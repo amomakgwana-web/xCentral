@@ -1030,21 +1030,16 @@ async function boot() {
   badgeEl.textContent = DB.env === 'production' ? 'Production' : 'Sandbox';
   badgeEl.className = `env-badge env-${DB.env}`;
 
-  const health = document.getElementById('healthLabel');
-  const chip = document.getElementById('healthChip');
-
-  if (!DB.configured) {
-    health.textContent = 'Not configured';
-    chip.className = 'chip';
-    chip.style.cssText = 'background:var(--amb-bg);color:var(--amb);border-color:var(--amb-bd)';
-  } else {
+  // Connection state is no longer surfaced in the header. It still
+  // reaches the user where it matters: an unconfigured project gets the
+  // explanatory panel in go(), and a failed call raises a toast.
+  if (DB.configured) {
     try {
       const profile = await DB.getProfile();
-      health.textContent = 'Live';
-      document.getElementById('userLabel').textContent = profile?.name ?? profile?.email ?? 'Sign in';
+      document.getElementById('userLabel').textContent =
+        profile?.name ?? profile?.email ?? 'Sign in';
     } catch {
-      health.textContent = 'Signed out';
-      chip.style.cssText = 'background:var(--bg2);color:var(--ink4);border-color:var(--border)';
+      document.getElementById('userLabel').textContent = 'Sign in';
     }
   }
 
