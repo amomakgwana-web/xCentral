@@ -1,0 +1,148 @@
+name: CI
+
+# The two suites guard different things and are kept apart deliberately:
+# `schema` proves the arithmetic the hub decides for itself still holds
+# (SA ID check digits, NCA affordability, consent gates, case scoring),
+# and `app` proves the MRZ parser and the console bundle still build.
+#
+# Neither needs a Supabase project. The schema job runs the migrations
+# against a stock Postgres using supabase/tests/harness.sql, which
+# stands in for auth.users, storage.buckets and the anon/authenticated/
+# service_role roles.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  schema:
+    name: Schema and logic
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # The official image ships contrib, so pgcrypto and pg_trgm —
+        # both required by the migrations — are available.
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Postgres client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Confirm the required extensions are available
+        run: |
+          missing=$(psql -tAc "
+            select string_agg(want, ', ')
+            from unnest(array['pgcrypto','pg_trgm']) want
+            where want not in (select name from pg_available_extensions);")
+          if [ -n "$missing" ]; then
+            echo "::error::Missing Postgres extensions: $missing"
+            exit 1
+          fi
+
+      # scripts/test-db.sh applies harness.sql, then every migration in
+      # order, then the assertions. It sets pipefail, so a raised
+      # assertion propagates as a non-zero exit rather than being
+      # swallowed by the pipe that formats the output.
+      - name: Migrations and logic assertions
+        run: PGDATABASE=xctest ./scripts/test-db.sh
+
+      # The seed is what the sandbox and every demo run on, so a seed
+      # that no longer applies is a broken change even when the
+      # migrations are fine.
+      - name: Seed applies to a fresh database
+        run: |
+          dropdb --if-exists xcseed
+          createdb xcseed
+          psql -v ON_ERROR_STOP=1 -q -d xcseed -f supabase/tests/harness.sql
+          for f in supabase/migrations/*.sql; do
+            psql -v ON_ERROR_STOP=1 -q -d xcseed -f "$f"
+          done
+          psql -v ON_ERROR_STOP=1 -q -d xcseed -f supabase/seed.sql
+
+      # A seeded case whose stored status disagrees with what
+      # case_score() computes means the scoring rules and the fixtures
+      # have drifted apart — which would make every demo misleading.
+      - name: Seeded cases agree with the scorer
+        run: |
+          drift=$(psql -tAc "
+            select count(*)
+            from public.verification_cases c
+            where c.score is distinct from (public.case_score(c.id)->>'score')::int;" -d xcseed)
+          if [ "$drift" != "0" ]; then
+            echo '::error::Seeded case scores no longer match case_score()'
+            psql -d xcseed -c "
+              select id, status, score,
+                     (public.case_score(id)->>'score')::int as recomputed
+              from public.verification_cases order by id;"
+            exit 1
+          fi
+
+  app:
+    name: Parser and bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --experimental-strip-types needs Node 22.6 or newer. The MRZ
+      # parser is plain TypeScript with no Deno APIs, so it runs
+      # unmodified here and in the edge runtime.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # ICAO 9303 specimen documents, including composite check digits
+      # and single-character tampering.
+      - name: MRZ assertions
+        run: npm run test:mrz
+
+      # Every edge function is checked for syntax. This is not a full
+      # typecheck — it catches the breakage that would take a function
+      # down on deploy, which is what matters without Deno here.
+      - name: Edge functions parse
+        run: |
+          status=0
+          for f in $(find supabase/functions -name '*.ts' | sort); do
+            if node --experimental-strip-types --check "$f" 2>/tmp/parse.log; then
+              echo "ok   $f"
+            else
+              echo "::error file=$f::Does not parse"
+              cat /tmp/parse.log
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Console builds
+        run: npm run build
