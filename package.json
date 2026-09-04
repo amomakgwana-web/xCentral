@@ -1,0 +1,20 @@
+{
+  "name": "xcentral",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "npm run test:mrz && npm run test:db",
+    "test:mrz": "node --experimental-strip-types supabase/functions/_shared/mrz.test.ts",
+    "test:db": "./scripts/test-db.sh"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.110.4"
+  }
+}
