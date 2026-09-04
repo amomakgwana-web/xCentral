@@ -154,13 +154,13 @@ const RENDER = {};
 const WIRE = {};
 
 RENDER.dashboard = async () => {
-  const d = await DB.fetchDashboard();
+  const [d, name] = await Promise.all([DB.fetchDashboard(), platformName()]);
   cache.reviewCount = d.needsReview;
 
   const rows = d.recent.length ? d.recent.map((c) => `
     <tr class="clickable" data-case="${esc(c.id)}">
       <td class="mono">${esc(c.id)}</td>
-      <td>${esc(c.platform)}</td>
+      <td>${esc(name(c.platform))}</td>
       <td class="mono muted">${esc(c.reference ?? '—')}</td>
       <td>${badge(c.level)}</td>
       <td>${badge(c.status)}</td>
@@ -202,13 +202,13 @@ WIRE.dashboard = () => {
 };
 
 RENDER.cases = async () => {
-  const cases = await DB.fetchCases({ limit: 300 });
+  const [cases, name] = await Promise.all([DB.fetchCases({ limit: 300 }), platformName()]);
   cache.reviewCount = cases.filter((c) => c.status === 'review').length;
 
   const rows = cases.length ? cases.map((c) => `
     <tr class="clickable" data-case="${esc(c.id)}">
       <td class="mono">${esc(c.id)}</td>
-      <td>${esc(c.platform)}</td>
+      <td>${esc(name(c.platform))}</td>
       <td class="mono muted">${esc(c.reference ?? '—')}</td>
       <td>${esc(titleCase(c.purpose))}</td>
       <td>${badge(c.level)}</td>
@@ -242,6 +242,20 @@ WIRE.cases = () => {
     });
   }));
 };
+
+// Platform ids are what the cases carry; people read names. Cached
+// because every case table needs the same lookup.
+async function platformName() {
+  if (!cache.platformNames) {
+    try {
+      const rows = await DB.fetchPlatforms();
+      cache.platformNames = new Map(rows.map((p) => [p.id, p.name]));
+    } catch {
+      cache.platformNames = new Map();
+    }
+  }
+  return (id) => cache.platformNames.get(id) ?? id;
+}
 
 function wireCaseRows() {
   document.querySelectorAll('tr[data-case]').forEach((r) =>
@@ -294,7 +308,7 @@ async function openCase(caseId) {
       ${subject}
       <div style="height:14px"></div>
       <dl class="kv">
-        <dt>Platform</dt><dd>${esc(c.platform)}</dd>
+        <dt>Platform</dt><dd>${esc((await platformName())(c.platform))}</dd>
         <dt>Reference</dt><dd class="mono">${esc(c.reference ?? '—')}</dd>
         <dt>Purpose · level</dt><dd>${esc(titleCase(c.purpose))} · ${badge(c.level)}</dd>
         <dt>Score</dt><dd style="max-width:200px">${meter(c.score)}</dd>
