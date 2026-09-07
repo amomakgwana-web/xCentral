@@ -48,6 +48,10 @@ const ICON = {
   platforms: '<path d="M7 7l-4 3 4 3M13 7l4 3-4 3M11 5l-2 10" stroke-linecap="round" stroke-linejoin="round"/>',
   audit: '<path d="M3 4h14M3 10h14M3 16h9" stroke-linecap="round"/><circle cx="15.5" cy="16" r="2.2"/>',
   retention: '<path d="M4 6h12l-1 11H5L4 6z" stroke-linejoin="round"/><path d="M7.5 6V4.5a1 1 0 011-1h3a1 1 0 011 1V6M8.5 9.5v4M11.5 9.5v4" stroke-linecap="round"/>',
+  customers: '<circle cx="7.5" cy="7" r="2.8"/><path d="M2.5 16c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5" stroke-linecap="round"/><path d="M13.5 5.5a2.4 2.4 0 010 4.6M15 15.8c0-2-.8-3.4-2-4.2" stroke-linecap="round"/>',
+  portfolio: '<rect x="2.5" y="6" width="15" height="10" rx="2"/><path d="M7 6V4.6A1.6 1.6 0 018.6 3h2.8A1.6 1.6 0 0113 4.6V6" stroke-linecap="round"/><path d="M2.5 10h15" stroke-linecap="round"/>',
+  payments: '<path d="M3 15.5V5a1 1 0 011-1h12a1 1 0 011 1v10.5" stroke-linecap="round"/><path d="M2 15.5h16" stroke-linecap="round"/><path d="M6.5 12l2.5-3 2.5 2 2.5-4" stroke-linecap="round" stroke-linejoin="round"/>',
+  fraud: '<path d="M10 2.4L3.4 5v4.8c0 4.5 2.9 7.7 6.6 9.1 3.7-1.4 6.6-4.6 6.6-9.1V5L10 2.4z"/><path d="M10 7.4v3.4M10 13.2v.5" stroke-linecap="round"/>',
 };
 
 const PAGES = [
@@ -57,6 +61,10 @@ const PAGES = [
   { id: 'documents',  label: 'Docs',     title: 'Document Verification',        sub: 'MRZ check digits · authenticity · expiry · private storage' },
   { id: 'credit',     label: 'Credit',   title: 'Credit Verification',          sub: 'Bureau enquiries · NCA Regulation 23A affordability' },
   { id: 'biometrics', label: 'Bio',      title: 'Biometric Verification',       sub: 'Face match · liveness · duplicate enrolment' },
+  { id: 'customers',  label: 'People',   title: 'Customers',                    sub: 'Profiles, background vetting and credit capacity' },
+  { id: 'portfolio',  label: 'Book',     title: 'Assets & Agreements',          sub: 'What is financed, on what terms, against which asset' },
+  { id: 'payments',   label: 'Pay',      title: 'Payments & Arrears',           sub: 'What was due, what arrived, and who is behind' },
+  { id: 'fraud',      label: 'Fraud',    title: 'Fraud Detection',              sub: 'Signals, alerts and the confirmed fraud register' },
   { id: 'consent',    label: 'Consent',  title: 'Consent Register',             sub: 'POPIA lawful basis · withdrawal · data subject requests' },
   { id: 'watchlist',  label: 'Screen',   title: 'Sanctions & PEP Screening',    sub: 'FIC obligations · watchlist hits and adjudication' },
   { id: 'platforms',  label: 'API',      title: 'Platforms & API Keys',         sub: 'The systems that call the hub, and what they may ask' },
@@ -114,11 +122,13 @@ function toast(msg, kind = '') {
 
 window.closeModal = () => document.getElementById('modal').classList.remove('open');
 
-function openModal(title, body, foot = '') {
+function openModal(title, body, foot = '', wide = false) {
   document.getElementById('modalTitle').textContent = title;
   document.getElementById('modalBody').innerHTML = body;
   document.getElementById('modalFoot').innerHTML = foot;
-  document.getElementById('modal').classList.add('open');
+  const modal = document.getElementById('modal');
+  modal.classList.toggle('wide', !!wide);
+  modal.classList.add('open');
 }
 
 async function go(pageId) {
@@ -1021,6 +1031,582 @@ RENDER.retention = async () => {
     </div>
   </div>`;
 };
+
+
+// ── Customers ───────────────────────────────────────────────────
+RENDER.customers = async () => {
+  const [customers, name] = await Promise.all([DB.fetchCustomers(), platformName()]);
+  cache.customers = customers;
+
+  const rows = customers.length ? customers.map((c) => `
+    <tr class="clickable" data-customer="${esc(c.id)}">
+      <td class="mono">${esc(c.customer_number ?? '—')}</td>
+      <td>${esc(name(c.platform_id))}</td>
+      <td>${badge(c.status)}</td>
+      <td class="muted">${esc(c.email ?? '—')}</td>
+      <td class="muted">${fmtDate(c.onboarded_at)}</td>
+    </tr>`).join('') : `<tr><td colspan="5">${emptyState('No customers yet.')}</td></tr>`;
+
+  return `
+  <div class="note note-info">
+    <b>A customer is a subject in an ongoing relationship with one platform.</b>
+    The same verified person can be a customer of the dealership and the lender without either
+    seeing the other's relationship — identity is shared, commercial history is not. Open a row for
+    the full profile: bureau score, payment history, exposure, open fraud signals, and how much
+    credit the assessment supports.
+  </div>
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">Customers</div>
+      <div class="card-sub">${customers.length} on the hub</div></div></div>
+    <table><thead><tr><th>Customer no.</th><th>Platform</th><th>Status</th>
+      <th>Email</th><th>Onboarded</th></tr></thead><tbody>${rows}</tbody></table>
+  </div>`;
+};
+
+WIRE.customers = () => {
+  document.querySelectorAll('tr[data-customer]').forEach((r) =>
+    r.addEventListener('click', () => openCustomer(r.dataset.customer)));
+};
+
+async function openCustomer(customerId) {
+  openModal('Customer', loading(), '', true);
+  try {
+    const p = await DB.fetchCustomerProfile(customerId);
+    const capacity = await DB.creditCapacity(customerId, { termMonths: 72, ratePct: 13.75 });
+
+    const b = p.payment_behaviour ?? {};
+    const bureau = p.credit?.bureau;
+    const aff = p.credit?.affordability;
+    const port = p.portfolio ?? {};
+
+    const contracts = (port.contracts ?? []).length
+      ? (port.contracts).map((ct) => `
+        <tr>
+          <td class="mono">${esc(ct.id)}</td>
+          <td>${esc(titleCase(ct.agreement_type))}</td>
+          <td>${ct.asset ? esc([ct.asset.make, ct.asset.model].filter(Boolean).join(' ')) : '<span class="muted">—</span>'}</td>
+          <td class="mono">${fmtRand(ct.instalment_cents)}</td>
+          <td class="mono">${fmtRand(ct.balance_cents)}</td>
+          <td class="mono ${ct.arrears_cents > 0 ? 'arrears' : ''}">${fmtRand(ct.arrears_cents)}</td>
+          <td>${badge(ct.status)}</td>
+        </tr>`).join('')
+      : `<tr><td colspan="7">${emptyState('No agreements.')}</td></tr>`;
+
+    const signals = (p.fraud?.signals ?? []).length
+      ? `<div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+          ${p.fraud.signals.map((sig) => `
+            <div style="display:flex;align-items:flex-start;gap:8px;font-size:11.5px">
+              ${badge(sig.severity === 'critical' ? 'failed' : 'review')}
+              <div><b>${esc(titleCase(sig.rule))}</b>
+                <div class="mono muted" style="font-size:10.5px;margin-top:2px">${esc(JSON.stringify(sig.detail))}</div>
+              </div>
+            </div>`).join('')}
+         </div>`
+      : '<div class="muted" style="font-size:12px;margin-top:6px">No open signals.</div>';
+
+    const capacityBlock = capacity?.decision === 'insufficient_data'
+      ? `<div class="note note-warn"><b>Capacity cannot be assessed.</b><br>
+           ${esc((capacity.reason_codes ?? []).map(titleCase).join(' · '))}
+           ${capacity.remedy ? `<br>${esc(capacity.remedy)}` : ''}</div>`
+      : `<div class="note ${capacity.decision === 'approve' ? 'note-info'
+            : capacity.decision === 'decline' ? 'note-danger' : 'note-warn'}">
+          <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+            <b style="font-size:13px">${esc(titleCase(capacity.decision))}</b>
+            <span class="badge b-${capacity.risk_grade === 'A' || capacity.risk_grade === 'B' ? 'passed'
+              : capacity.risk_grade === 'E' ? 'failed' : 'review'}">Grade ${esc(capacity.risk_grade)}</span>
+          </div>
+          <dl class="kv" style="margin-top:9px">
+            <dt>Can afford per month</dt><dd class="mono"><b>${fmtRand(capacity.max_instalment_cents)}</b></dd>
+            <dt>Supports a principal of</dt><dd class="mono"><b>${fmtRand(capacity.max_principal_cents)}</b></dd>
+            <dt>Recommended limit</dt><dd class="mono"><b>${fmtRand(capacity.recommended_limit_cents)}</b></dd>
+            <dt>At</dt><dd>${esc(capacity.assumed_rate_pct)}% over ${esc(capacity.assumed_term_months)} months</dd>
+          </dl>
+          ${(capacity.reason_codes ?? []).length
+            ? `<div style="margin-top:8px;font-size:11px">${esc(capacity.reason_codes.map(titleCase).join(' · '))}</div>` : ''}
+         </div>`;
+
+    openModal(`${p.identity?.name || 'Customer'} · ${p.customer?.customer_number ?? ''}`, `
+      <div class="g2" style="gap:14px">
+        <div>
+          <div class="card-title" style="margin-bottom:8px">Identity</div>
+          <dl class="kv">
+            <dt>Name</dt><dd>${esc(p.identity?.name ?? '—')}</dd>
+            <dt>Identifier</dt><dd class="mono">${esc(titleCase(p.identity?.id_type))} ···· ${esc(p.identity?.id_last4 ?? '')}</dd>
+            <dt>Date of birth</dt><dd>${fmtDate(p.identity?.date_of_birth)}</dd>
+            <dt>Assurance</dt><dd>${badge(p.identity?.assurance_level)}</dd>
+            <dt>Status</dt><dd>${badge(p.customer?.status)}</dd>
+          </dl>
+        </div>
+        <div>
+          <div class="card-title" style="margin-bottom:8px">Contact & work</div>
+          <dl class="kv">
+            <dt>Phone</dt><dd>${(p.contact?.phones ?? []).map((ph) =>
+              `<div class="mono">${esc(ph.msisdn)} <span class="muted">${esc(ph.network ?? '')}</span>
+               ${ph.days_since_sim_swap !== null && ph.days_since_sim_swap <= 30
+                 ? '<span class="badge b-failed">SIM swap ' + esc(ph.days_since_sim_swap) + 'd ago</span>' : ''}</div>`
+              ).join('') || '<span class="muted">—</span>'}</dd>
+            <dt>Address</dt><dd>${(p.contact?.addresses ?? []).map((a) =>
+              `<div>${esc([a.line1, a.suburb, a.city].filter(Boolean).join(', '))}
+               ${a.shared_with >= 4 ? '<span class="badge b-review">shared with ' + esc(a.shared_with) + '</span>' : ''}</div>`
+              ).join('') || '<span class="muted">—</span>'}</dd>
+            <dt>Employer</dt><dd>${(p.employment ?? []).map((e) =>
+              `<div>${esc(e.employer ?? '—')}
+               ${e.cipc_status === 'not_found' ? '<span class="badge b-failed">not at CIPC</span>'
+                 : e.cipc_status === 'in_business' ? '<span class="badge b-passed">registered</span>' : ''}</div>`
+              ).join('') || '<span class="muted">—</span>'}</dd>
+          </dl>
+        </div>
+      </div>
+
+      <div style="height:16px"></div>
+      <div class="card-title" style="margin-bottom:8px">How much credit can be given</div>
+      ${capacityBlock}
+
+      <div style="height:16px"></div>
+      <div class="g3" style="gap:12px">
+        <div class="stat ${bureau ? (bureau.risk === 'low' ? 'green' : bureau.risk === 'high' ? 'red' : 'amber') : ''}">
+          <div class="stat-lbl">Bureau score</div>
+          <div class="stat-val">${bureau?.score ?? '—'}</div>
+          <div class="stat-meta">${bureau ? esc(bureau.band ?? '') + ' · ' + esc(bureau.bureau ?? '') : 'No bureau record'}</div>
+        </div>
+        <div class="stat ${b.score >= 70 ? 'green' : b.score >= 40 ? 'amber' : 'red'}">
+          <div class="stat-lbl">Payment behaviour</div>
+          <div class="stat-val">${b.score ?? '—'}</div>
+          <div class="stat-meta">${b.has_history
+            ? esc(b.on_time_pct) + '% on time · ' + esc(b.reversals) + ' reversal(s)'
+            : 'No history on this platform'}</div>
+        </div>
+        <div class="stat ${(p.fraud?.highest_score ?? 0) >= 45 ? 'red' : (p.fraud?.highest_score ?? 0) > 0 ? 'amber' : 'green'}">
+          <div class="stat-lbl">Fraud</div>
+          <div class="stat-val">${p.fraud?.highest_score ?? 0}</div>
+          <div class="stat-meta">${esc(p.fraud?.open_alerts ?? 0)} open alert(s)</div>
+        </div>
+      </div>
+
+      ${aff ? `<div style="height:14px"></div>
+      <dl class="kv">
+        <dt>Net income</dt><dd class="mono">${fmtRand(aff.net_income_cents)}</dd>
+        <dt>Discretionary income</dt><dd class="mono">${fmtRand(aff.discretionary_income_cents)}</dd>
+        <dt>Income corroborated</dt><dd>${aff.income_verified ? badge('passed') : badge('review')}</dd>
+        <dt>Affordability</dt><dd>${badge(aff.outcome)}</dd>
+      </dl>` : ''}
+
+      <div style="height:16px"></div>
+      <div class="card-title" style="margin-bottom:8px">Agreements</div>
+      <div style="overflow-x:auto">
+      <table><thead><tr><th>Contract</th><th>Type</th><th>Asset</th><th>Instalment</th>
+        <th>Balance</th><th>Arrears</th><th>Status</th></tr></thead><tbody>${contracts}</tbody></table>
+      </div>
+      <dl class="kv" style="margin-top:10px">
+        <dt>Total exposure</dt><dd class="mono"><b>${fmtRand(port.total_exposure_cents)}</b></dd>
+        <dt>Monthly commitment</dt><dd class="mono">${fmtRand(port.monthly_commitment_cents)}</dd>
+        <dt>Total arrears</dt><dd class="mono">${fmtRand(port.total_arrears_cents)}</dd>
+      </dl>
+
+      <div style="height:16px"></div>
+      <div class="card-title">Fraud signals</div>
+      ${signals}`,
+      `<button class="btn" onclick="closeModal()">Close</button>
+       <button class="btn btn-primary btn-sm" id="rescreenBtn">Re-screen for fraud</button>`,
+      true);
+
+    document.getElementById('rescreenBtn')?.addEventListener('click', async () => {
+      try {
+        const r = await DB.screenForFraud({ customerId });
+        toast(`Screen complete — ${r.signals} signal(s), ${r.critical} critical`,
+          r.critical > 0 ? 'err' : 'ok');
+        openCustomer(customerId);
+      } catch (e) { toast(e.message, 'err'); }
+    });
+  } catch (e) {
+    openModal('Customer', errorState(e));
+  }
+}
+
+// ── Portfolio ───────────────────────────────────────────────────
+RENDER.portfolio = async () => {
+  const [contracts, assets, customers, name] = await Promise.all([
+    DB.fetchContracts(), DB.fetchAssets(), DB.fetchCustomers(), platformName(),
+  ]);
+  const custById = new Map(customers.map((c) => [c.id, c]));
+
+  const advanced = contracts.reduce((a, c) => a + Number(c.principal_cents ?? 0), 0);
+  const outstanding = contracts.filter((c) => ['active','in_arrears','defaulted','legal'].includes(c.status))
+    .reduce((a, c) => a + Number(c.balance_cents ?? 0), 0);
+  const monthly = contracts.filter((c) => ['active','in_arrears'].includes(c.status))
+    .reduce((a, c) => a + Number(c.instalment_cents ?? 0), 0);
+
+  const rows = contracts.length ? contracts.map((c) => `
+    <tr class="clickable" data-contract="${esc(c.id)}">
+      <td class="mono">${esc(c.id)}</td>
+      <td>${esc(custById.get(c.customer_id)?.customer_number ?? '—')}</td>
+      <td>${esc(name(c.platform_id))}</td>
+      <td>${esc(titleCase(c.agreement_type))}</td>
+      <td class="mono">${fmtRand(c.principal_cents)}</td>
+      <td class="mono">${fmtRand(c.instalment_cents)}</td>
+      <td class="mono">${esc(c.interest_rate_pct)}% / ${esc(c.term_months)}m</td>
+      <td class="mono">${fmtRand(c.balance_cents)}</td>
+      <td>${badge(c.status)}</td>
+    </tr>`).join('') : `<tr><td colspan="9">${emptyState('No agreements yet.')}</td></tr>`;
+
+  const assetRows = assets.length ? assets.map((a) => `
+    <tr>
+      <td><b>${esc([a.make, a.model].filter(Boolean).join(' '))}</b>
+        <div class="muted" style="font-size:10.5px">${esc(a.variant ?? '')} ${a.year ? esc(a.year) : ''}</div></td>
+      <td>${badge(a.asset_type.startsWith('vehicle') ? 'identity' : 'document')}
+        <span class="muted" style="font-size:10.5px">${esc(titleCase(a.asset_type))}</span></td>
+      <td class="mono muted">${esc(a.vin ?? a.imei ?? a.serial_number ?? '—')}</td>
+      <td class="mono muted">${esc(a.registration_number ?? '—')}</td>
+      <td class="mono">${fmtRand(a.retail_value_cents)}</td>
+      <td>${badge(a.status)}</td>
+      <td>${a.registry_status
+        ? `<span class="badge b-${a.registry_status === 'clear' ? 'passed' : 'failed'}">${esc(titleCase(a.registry_status))}</span>`
+        : '<span class="muted">not checked</span>'}</td>
+    </tr>`).join('') : `<tr><td colspan="7">${emptyState('No assets on file.')}</td></tr>`;
+
+  return `
+  <div class="g4">
+    <div class="stat blue"><div class="stat-lbl">Agreements</div><div class="stat-val">${contracts.length}</div>
+      <div class="stat-meta">${contracts.filter((c)=>c.status==='active').length} active</div></div>
+    <div class="stat purple"><div class="stat-lbl">Advanced</div>
+      <div class="stat-val" style="font-size:19px">${fmtRand(advanced)}</div>
+      <div class="stat-meta">Total principal written</div></div>
+    <div class="stat amber"><div class="stat-lbl">Outstanding</div>
+      <div class="stat-val" style="font-size:19px">${fmtRand(outstanding)}</div>
+      <div class="stat-meta">Book still at risk</div></div>
+    <div class="stat green"><div class="stat-lbl">Monthly instalments</div>
+      <div class="stat-val" style="font-size:19px">${fmtRand(monthly)}</div>
+      <div class="stat-meta">Expected each month</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">Agreements</div>
+      <div class="card-sub">Click a row for the instalment schedule</div></div></div>
+    <div style="overflow-x:auto">
+    <table><thead><tr><th>Contract</th><th>Customer</th><th>Platform</th><th>Type</th>
+      <th>Principal</th><th>Instalment</th><th>Rate / term</th><th>Balance</th><th>Status</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">Assets</div>
+      <div class="card-sub">A VIN or IMEI names one physical unit, so the database refuses to let two live agreements share one</div></div></div>
+    <div style="overflow-x:auto">
+    <table><thead><tr><th>Asset</th><th>Type</th><th>VIN / IMEI</th><th>Registration</th>
+      <th>Value</th><th>Status</th><th>Registry</th></tr></thead><tbody>${assetRows}</tbody></table></div>
+  </div>`;
+};
+
+WIRE.portfolio = () => {
+  document.querySelectorAll('tr[data-contract]').forEach((r) =>
+    r.addEventListener('click', () => openContract(r.dataset.contract)));
+};
+
+async function openContract(contractId) {
+  openModal(contractId, loading());
+  try {
+    const [schedule, payments, contracts] = await Promise.all([
+      DB.fetchSchedule(contractId),
+      DB.fetchPayments({ contractId }),
+      DB.fetchContracts(),
+    ]);
+    const c = contracts.find((x) => x.id === contractId);
+    const version = Math.max(...schedule.map((s) => s.version ?? 1), 1);
+    const live = schedule.filter((s) => (s.version ?? 1) === version);
+
+    const rows = live.map((s) => `
+      <tr>
+        <td class="mono">${s.instalment_no}</td>
+        <td class="muted">${fmtDate(s.due_date)}</td>
+        <td class="mono">${fmtRand(s.amount_due_cents)}</td>
+        <td class="mono">${fmtRand(s.amount_paid_cents)}</td>
+        <td>${badge(s.status === 'paid' ? 'passed' : s.status === 'missed' ? 'failed'
+              : s.status === 'partial' ? 'review' : 'pending')}
+          <span class="muted" style="font-size:10.5px">${esc(titleCase(s.status))}</span></td>
+        <td class="muted">${fmtDate(s.paid_on)}</td>
+      </tr>`).join('');
+
+    const payRows = payments.length ? payments.map((p) => `
+      <tr>
+        <td class="muted">${fmtDateTime(p.paid_at)}</td>
+        <td class="mono">${fmtRand(p.amount_cents)}</td>
+        <td>${esc(titleCase(p.method))}</td>
+        <td class="mono muted">${esc(p.external_reference ?? '—')}</td>
+        <td>${p.status === 'reversed'
+          ? `<span class="badge b-failed">Reversed</span>` : badge(p.status)}</td>
+        <td class="muted">${esc(p.reversal_reason ?? '')}</td>
+      </tr>`).join('') : `<tr><td colspan="6">${emptyState('No payments recorded.')}</td></tr>`;
+
+    openModal(`${contractId} · ${titleCase(c?.status ?? '')}`, `
+      <dl class="kv">
+        <dt>Type</dt><dd>${esc(titleCase(c?.agreement_type))}</dd>
+        <dt>Principal</dt><dd class="mono">${fmtRand(c?.principal_cents)}</dd>
+        <dt>Instalment</dt><dd class="mono"><b>${fmtRand(c?.instalment_cents)}</b></dd>
+        <dt>Rate / term</dt><dd>${esc(c?.interest_rate_pct)}% over ${esc(c?.term_months)} months</dd>
+        <dt>Total repayable</dt><dd class="mono">${fmtRand(c?.total_repayable_cents)}</dd>
+        <dt>Balance</dt><dd class="mono">${fmtRand(c?.balance_cents)}</dd>
+        <dt>Arrears</dt><dd class="mono">${fmtRand(c?.arrears_cents)}
+          ${c?.months_in_arrears ? `<span class="badge b-failed">${esc(c.months_in_arrears)} months</span>` : ''}</dd>
+        <dt>Collection</dt><dd>${esc(titleCase(c?.collection_method ?? '—'))}</dd>
+      </dl>
+
+      <div style="height:16px"></div>
+      <div class="card-title" style="margin-bottom:8px">Payments received</div>
+      <div style="overflow-x:auto">
+      <table><thead><tr><th>When</th><th>Amount</th><th>Method</th><th>Reference</th>
+        <th>Status</th><th>Note</th></tr></thead><tbody>${payRows}</tbody></table></div>
+
+      <div style="height:16px"></div>
+      <div class="card-title" style="margin-bottom:8px">Instalment schedule</div>
+      <div style="max-height:300px;overflow:auto">
+      <table><thead><tr><th>#</th><th>Due</th><th>Amount</th><th>Paid</th>
+        <th>Status</th><th>Settled</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+      `<button class="btn" onclick="closeModal()">Close</button>`, true);
+  } catch (e) {
+    openModal(contractId, errorState(e));
+  }
+}
+
+// ── Payments ────────────────────────────────────────────────────
+RENDER.payments = async () => {
+  const [payments, arrears, customers, name] = await Promise.all([
+    DB.fetchPayments({ limit: 150 }), DB.fetchArrearsBook(), DB.fetchCustomers(), platformName(),
+  ]);
+  const custById = new Map(customers.map((c) => [c.id, c]));
+
+  const received = payments.filter((p) => p.status === 'received');
+  const reversed = payments.filter((p) => p.status === 'reversed');
+  const collected = received.reduce((a, p) => a + Number(p.amount_cents ?? 0), 0);
+  const totalArrears = arrears.reduce((a, c) => a + Number(c.arrears_cents ?? 0), 0);
+
+  const arrearsRows = arrears.length ? arrears.map((c) => `
+    <tr class="clickable" data-contract="${esc(c.id)}">
+      <td class="mono">${esc(c.id)}</td>
+      <td>${esc(custById.get(c.customer_id)?.customer_number ?? '—')}</td>
+      <td>${esc(name(c.platform_id))}</td>
+      <td class="mono arrears"><b>${fmtRand(c.arrears_cents)}</b></td>
+      <td><span class="badge b-${c.months_in_arrears >= 3 ? 'failed' : 'review'}">${esc(c.months_in_arrears)} months</span></td>
+      <td class="mono">${fmtRand(c.instalment_cents)}</td>
+      <td class="muted">${fmtDate(c.last_payment_date)}</td>
+      <td>${badge(c.status)}</td>
+    </tr>`).join('') : `<tr><td colspan="8">${emptyState('Nothing in arrears.')}</td></tr>`;
+
+  const payRows = payments.length ? payments.map((p) => `
+    <tr>
+      <td class="muted">${fmtDateTime(p.paid_at)}</td>
+      <td>${esc(custById.get(p.customer_id)?.customer_number ?? '—')}</td>
+      <td class="mono muted">${esc(p.contract_id)}</td>
+      <td class="mono">${fmtRand(p.amount_cents)}</td>
+      <td>${esc(titleCase(p.method))}</td>
+      <td>${esc(p.source_platform ? name(p.source_platform) : '—')}</td>
+      <td>${p.status === 'reversed' ? '<span class="badge b-failed">Reversed</span>' : badge(p.status)}</td>
+    </tr>`).join('') : `<tr><td colspan="7">${emptyState('No payments recorded.')}</td></tr>`;
+
+  return `
+  <div class="note note-info">
+    <b>xCentral does not collect money — it checks it arrived.</b> BipraPay and xPayments take the
+    payment and post it here; this platform compares what was due with what came in. A debit order
+    that presents and bounces is recorded as a reversal rather than as a payment that never happened,
+    because the money not being there on the day is the signal that matters.
+  </div>
+
+  <div class="g4">
+    <div class="stat green"><div class="stat-lbl">Collected</div>
+      <div class="stat-val" style="font-size:19px">${fmtRand(collected)}</div>
+      <div class="stat-meta">${received.length} payment(s) received</div></div>
+    <div class="stat red"><div class="stat-lbl">Total arrears</div>
+      <div class="stat-val" style="font-size:19px">${fmtRand(totalArrears)}</div>
+      <div class="stat-meta">Across ${arrears.length} agreement(s)</div></div>
+    <div class="stat amber"><div class="stat-lbl">Reversals</div><div class="stat-val">${reversed.length}</div>
+      <div class="stat-meta">Presented and bounced</div></div>
+    <div class="stat purple"><div class="stat-lbl">Worst arrears</div>
+      <div class="stat-val">${arrears.length ? arrears[0].months_in_arrears : 0}</div>
+      <div class="stat-meta">Months behind</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">Arrears book</div>
+      <div class="card-sub">Worst first · click for the schedule and payment history</div></div></div>
+    <div style="overflow-x:auto">
+    <table><thead><tr><th>Contract</th><th>Customer</th><th>Platform</th><th>Arrears</th>
+      <th>Behind</th><th>Instalment</th><th>Last paid</th><th>Status</th></tr></thead>
+    <tbody>${arrearsRows}</tbody></table></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">Recent payments</div>
+      <div class="card-sub">As posted by the collecting platform</div></div></div>
+    <div style="overflow-x:auto">
+    <table><thead><tr><th>When</th><th>Customer</th><th>Contract</th><th>Amount</th>
+      <th>Method</th><th>Collected by</th><th>Status</th></tr></thead><tbody>${payRows}</tbody></table></div>
+  </div>`;
+};
+
+WIRE.payments = () => {
+  document.querySelectorAll('tr[data-contract]').forEach((r) =>
+    r.addEventListener('click', () => openContract(r.dataset.contract)));
+};
+
+// ── Fraud ───────────────────────────────────────────────────────
+RENDER.fraud = async () => {
+  const [alerts, signals, rules, customers] = await Promise.all([
+    DB.fetchFraudAlerts(), DB.fetchFraudSignals(), DB.fetchFraudRules(), DB.fetchCustomers(),
+  ]);
+  const custById = new Map(customers.map((c) => [c.id, c]));
+
+  const open = alerts.filter((a) => ['open','investigating'].includes(a.status));
+  const critical = alerts.filter((a) => a.severity === 'critical' && a.status === 'open');
+  const confirmed = alerts.filter((a) => a.status === 'confirmed_fraud');
+
+  const alertRows = alerts.length ? alerts.map((a) => `
+    <tr class="clickable" data-alert="${esc(a.id)}">
+      <td>${badge(a.severity === 'critical' || a.severity === 'high' ? 'failed'
+            : a.severity === 'medium' ? 'review' : 'passed')}
+        <span class="muted" style="font-size:10.5px">${esc(titleCase(a.severity))}</span></td>
+      <td class="mono">${a.score}</td>
+      <td>${esc(custById.get(a.customer_id)?.customer_number ?? a.case_id ?? '—')}</td>
+      <td class="mono">${a.signal_count} <span class="muted">(${a.critical_count} critical)</span></td>
+      <td>${badge(a.status === 'confirmed_fraud' ? 'failed'
+            : a.status === 'false_positive' ? 'passed' : 'review')}
+        <span class="muted" style="font-size:10.5px">${esc(titleCase(a.status))}</span></td>
+      <td class="muted">${fmtDateTime(a.created_at)}</td>
+    </tr>`).join('') : `<tr><td colspan="6">${emptyState('No alerts raised.')}</td></tr>`;
+
+  const byRule = {};
+  signals.forEach((s) => { byRule[s.rule_code] = (byRule[s.rule_code] ?? 0) + 1; });
+  const ruleRows = rules.map((r) => `
+    <tr>
+      <td><b>${esc(r.name)}</b>
+        <div class="muted" style="font-size:10.5px;max-width:520px">${esc(r.description)}</div></td>
+      <td>${badge(r.domain === 'document' ? 'document' : r.domain === 'identity' ? 'identity'
+            : r.domain === 'employment' || r.domain === 'banking' ? 'credit' : 'biometric')}
+        <span class="muted" style="font-size:10.5px">${esc(titleCase(r.domain))}</span></td>
+      <td>${badge(r.severity === 'critical' ? 'failed' : r.severity === 'warn' ? 'review' : 'passed')}</td>
+      <td class="mono">${esc(r.weight)}</td>
+      <td class="mono">${byRule[r.code] ?? 0}</td>
+    </tr>`).join('');
+
+  return `
+  <div class="note note-danger">
+    <b>Most application fraud is not clever.</b> It is the same document submitted under two names,
+    one address serving nine unrelated applicants, a payslip whose gross minus deductions does not
+    equal its net, a SIM swapped four days before the application, a car financed twice. None of
+    that needs a model to catch — it needs the data joined up and the arithmetic actually done.
+    Every rule below is a query over data the hub already holds, and every signal carries the
+    evidence a person can check.
+  </div>
+
+  <div class="g4">
+    <div class="stat red"><div class="stat-lbl">Open alerts</div><div class="stat-val">${open.length}</div>
+      <div class="stat-meta">${critical.length} critical</div></div>
+    <div class="stat amber"><div class="stat-lbl">Live signals</div><div class="stat-val">${signals.length}</div>
+      <div class="stat-meta">Undismissed</div></div>
+    <div class="stat purple"><div class="stat-lbl">Rules active</div><div class="stat-val">${rules.length}</div>
+      <div class="stat-meta">Held as data, tuned by update</div></div>
+    <div class="stat green"><div class="stat-lbl">Confirmed</div><div class="stat-val">${confirmed.length}</div>
+      <div class="stat-meta">Written to the register</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">Alert queue</div>
+      <div class="card-sub">Click an alert to see the signals behind it</div></div></div>
+    <table><thead><tr><th>Severity</th><th>Score</th><th>Subject</th><th>Signals</th>
+      <th>Status</th><th>Raised</th></tr></thead><tbody>${alertRows}</tbody></table>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">Detection rules</div>
+      <div class="card-sub">Thresholds and weights are rows, so tuning is an update and past decisions stay explicable</div></div></div>
+    <div style="overflow-x:auto">
+    <table><thead><tr><th>Rule</th><th>Domain</th><th>Severity</th><th>Weight</th><th>Fired</th></tr></thead>
+    <tbody>${ruleRows}</tbody></table></div>
+  </div>`;
+};
+
+WIRE.fraud = () => {
+  document.querySelectorAll('tr[data-alert]').forEach((r) =>
+    r.addEventListener('click', () => openAlert(r.dataset.alert)));
+};
+
+async function openAlert(alertId) {
+  openModal('Fraud alert', loading());
+  try {
+    const [alerts, customers] = await Promise.all([DB.fetchFraudAlerts(), DB.fetchCustomers()]);
+    const a = alerts.find((x) => x.id === alertId);
+    if (!a) { openModal('Fraud alert', errorState(new Error('Alert not found'))); return; }
+
+    const signals = await DB.fetchFraudSignals(
+      a.customer_id ? { customerId: a.customer_id } : { caseId: a.case_id });
+    const cust = customers.find((c) => c.id === a.customer_id);
+
+    const list = signals.length ? signals.map((s) => `
+      <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          ${badge(s.severity === 'critical' ? 'failed' : s.severity === 'warn' ? 'review' : 'passed')}
+          <b style="font-size:12.5px">${esc(titleCase(s.rule_code))}</b>
+          <span class="mono muted" style="margin-left:auto">weight ${esc(s.weight)}</span>
+        </div>
+        <div class="mono" style="font-size:10.5px;color:var(--ink3);margin-top:5px;word-break:break-all">
+          ${esc(JSON.stringify(s.detail))}</div>
+        <button class="btn btn-sm" style="margin-top:7px" data-dismiss="${esc(s.id)}">Dismiss this signal</button>
+      </div>`).join('') : emptyState('No live signals on this alert.');
+
+    const resolved = ['confirmed_fraud','false_positive','closed'].includes(a.status);
+
+    openModal(`Alert · ${titleCase(a.severity)} · score ${a.score}`, `
+      <dl class="kv">
+        <dt>Customer</dt><dd>${esc(cust?.customer_number ?? '—')}</dd>
+        <dt>Case</dt><dd class="mono">${esc(a.case_id ?? '—')}</dd>
+        <dt>Signals</dt><dd>${a.signal_count} (${a.critical_count} critical)</dd>
+        <dt>Status</dt><dd>${badge(a.status === 'confirmed_fraud' ? 'failed'
+          : a.status === 'false_positive' ? 'passed' : 'review')}</dd>
+        ${a.resolution_note ? `<dt>Resolution</dt><dd>${esc(a.resolution_note)}</dd>` : ''}
+      </dl>
+      <div class="note note-warn" style="margin-top:12px">
+        Confirming fraud writes this person's identifiers — identity hash, phone, bank account — to
+        the register, so the same entity is caught on sight next time rather than re-investigated
+        from scratch. It also suspends the customer.
+      </div>
+      <div style="height:14px"></div>
+      <div class="card-title" style="margin-bottom:4px">Signals</div>
+      ${list}`,
+      resolved
+        ? `<button class="btn" onclick="closeModal()">Close</button>`
+        : `<button class="btn" onclick="closeModal()">Close</button>
+           <button class="btn btn-sm" id="falsePositiveBtn">False positive</button>
+           <button class="btn btn-danger btn-sm" id="confirmFraudBtn">Confirm fraud</button>`);
+
+    document.querySelectorAll('[data-dismiss]').forEach((b) => b.addEventListener('click', async () => {
+      const reason = prompt('Why is this signal not a concern?');
+      if (!reason) return;
+      try {
+        await DB.dismissFraudSignal(b.dataset.dismiss, reason);
+        toast('Signal dismissed', 'ok');
+        openAlert(alertId);
+      } catch (e) { toast(e.message, 'err'); }
+    }));
+
+    const resolve = async (outcome, label) => {
+      const note = prompt(`${label} — what did you find?`);
+      if (note === null) return;
+      try {
+        const r = await DB.resolveFraudAlert(alertId, outcome, note);
+        toast(outcome === 'confirmed_fraud'
+          ? `Confirmed · ${r.registerEntries} identifier(s) added to the register`
+          : 'Marked as a false positive', 'ok');
+        closeModal();
+        go('fraud');
+      } catch (e) { toast(e.message, 'err'); }
+    };
+
+    document.getElementById('confirmFraudBtn')?.addEventListener('click',
+      () => resolve('confirmed_fraud', 'Confirm fraud'));
+    document.getElementById('falsePositiveBtn')?.addEventListener('click',
+      () => resolve('false_positive', 'False positive'));
+  } catch (e) {
+    openModal('Fraud alert', errorState(e));
+  }
+}
 
 // ── Boot ────────────────────────────────────────────────────────
 async function boot() {

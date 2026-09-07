@@ -251,3 +251,161 @@ export async function livenessCheck(sampleRef: string): Promise<LivenessResult> 
     provider: 'simulation',
   };
 }
+
+// ══════════════════════════════════════════════════════════════
+// Background vetting adapters.
+//
+// Same contract and the same fence as above: deterministic in
+// simulation, stamped in the ledger, and refused against a production
+// platform unless explicitly overridden.
+//
+// The real counterparts are: a RICA/SIM-swap feed from the networks or
+// an aggregator, CIPC for company registration, a bank account
+// verification service, and NaTIS for vehicle title.
+// ══════════════════════════════════════════════════════════════
+
+export interface AddressLookupResult {
+  confirmed: boolean;
+  confidence: number;
+  sourceCount: number;
+  provider: ProviderName;
+}
+
+export interface PhoneLookupResult {
+  ricaStatus: 'registered_to_subject' | 'registered_to_other' | 'not_registered' | 'not_found' | 'unavailable';
+  registeredName: string | null;
+  network: string;
+  lineType: string;
+  tenureDays: number;
+  // The signal that matters most: null when there has been no swap.
+  daysSinceSimSwap: number | null;
+  lastPortedDaysAgo: number | null;
+  provider: ProviderName;
+}
+
+export interface EmployerLookupResult {
+  status: 'in_business' | 'deregistered' | 'in_liquidation' | 'not_found' | 'unavailable';
+  registrationNumber: string | null;
+  sector: string | null;
+  provider: ProviderName;
+}
+
+export interface BankAccountResult {
+  status: 'verified' | 'name_mismatch' | 'account_not_found' | 'account_closed' | 'unavailable';
+  accountOpenMonths: number | null;
+  provider: ProviderName;
+}
+
+export interface AssetRegistryResult {
+  status: 'clear' | 'encumbered' | 'stolen' | 'not_found' | 'mismatch' | 'unavailable';
+  titleHolder: string | null;
+  provider: ProviderName;
+}
+
+export async function addressLookup(addressHash: string, subjectName: string): Promise<AddressLookupResult> {
+  const rand = mulberry32(await seedFrom(`address:${addressHash}:${subjectName}`));
+  const roll = rand();
+  const confirmed = roll < 0.82;
+  return {
+    confirmed,
+    confidence: Number((confirmed ? 70 + rand() * 30 : rand() * 45).toFixed(2)),
+    sourceCount: confirmed ? 1 + Math.floor(rand() * 3) : 0,
+    provider: 'simulation',
+  };
+}
+
+export async function phoneLookup(msisdn: string, subjectName: string): Promise<PhoneLookupResult> {
+  const rand = mulberry32(await seedFrom(`phone:${msisdn}`));
+  const roll = rand();
+
+  let ricaStatus: PhoneLookupResult['ricaStatus'];
+  if (roll < 0.80) ricaStatus = 'registered_to_subject';
+  else if (roll < 0.90) ricaStatus = 'registered_to_other';
+  else if (roll < 0.96) ricaStatus = 'not_registered';
+  else ricaStatus = 'not_found';
+
+  // A swap is uncommon, and a recent one is what the fraud rule wants
+  // to see. Most numbers return null here.
+  const swapRoll = rand();
+  const daysSinceSimSwap = swapRoll < 0.06
+    ? Math.floor(rand() * 25)      // recent — the pattern that matters
+    : swapRoll < 0.20
+      ? 60 + Math.floor(rand() * 900)
+      : null;
+
+  const networks = ['Vodacom', 'MTN', 'Cell C', 'Telkom', 'Rain'];
+
+  return {
+    ricaStatus,
+    registeredName: ricaStatus === 'registered_to_subject' ? subjectName : null,
+    network: networks[Math.floor(rand() * networks.length)],
+    lineType: rand() < 0.62 ? 'mobile_prepaid' : 'mobile_contract',
+    tenureDays: 30 + Math.floor(rand() * 3000),
+    daysSinceSimSwap,
+    lastPortedDaysAgo: rand() < 0.1 ? Math.floor(rand() * 700) : null,
+    provider: 'simulation',
+  };
+}
+
+export async function employerLookup(employerName: string): Promise<EmployerLookupResult> {
+  const rand = mulberry32(await seedFrom(`employer:${employerName.toLowerCase().trim()}`));
+  const roll = rand();
+
+  let status: EmployerLookupResult['status'];
+  if (roll < 0.80) status = 'in_business';
+  else if (roll < 0.88) status = 'not_found';
+  else if (roll < 0.94) status = 'deregistered';
+  else if (roll < 0.97) status = 'in_liquidation';
+  else status = 'unavailable';
+
+  const sectors = ['Retail', 'Mining', 'Financial Services', 'Construction',
+                   'Transport', 'Agriculture', 'Manufacturing', 'Public Sector'];
+
+  return {
+    status,
+    registrationNumber: status === 'not_found' || status === 'unavailable'
+      ? null
+      : `${2000 + Math.floor(rand() * 25)}/${100000 + Math.floor(rand() * 899999)}/07`,
+    sector: status === 'not_found' ? null : sectors[Math.floor(rand() * sectors.length)],
+    provider: 'simulation',
+  };
+}
+
+export async function verifyBankAccount(accountHash: string, holderName: string): Promise<BankAccountResult> {
+  const rand = mulberry32(await seedFrom(`avs:${accountHash}:${holderName}`));
+  const roll = rand();
+
+  let status: BankAccountResult['status'];
+  if (roll < 0.84) status = 'verified';
+  else if (roll < 0.92) status = 'name_mismatch';
+  else if (roll < 0.96) status = 'account_not_found';
+  else if (roll < 0.98) status = 'account_closed';
+  else status = 'unavailable';
+
+  return {
+    status,
+    accountOpenMonths: status === 'verified' ? 1 + Math.floor(rand() * 200) : null,
+    provider: 'simulation',
+  };
+}
+
+export async function assetRegistryLookup(identifier: string, assetType: string): Promise<AssetRegistryResult> {
+  const rand = mulberry32(await seedFrom(`registry:${assetType}:${identifier}`));
+  const roll = rand();
+
+  let status: AssetRegistryResult['status'];
+  if (roll < 0.80) status = 'clear';
+  else if (roll < 0.92) status = 'encumbered';
+  else if (roll < 0.95) status = 'mismatch';
+  else if (roll < 0.97) status = 'stolen';
+  else if (roll < 0.99) status = 'not_found';
+  else status = 'unavailable';
+
+  return {
+    status,
+    titleHolder: status === 'clear' || status === 'encumbered'
+      ? (rand() < 0.5 ? 'Registered owner on file' : 'Financier interest noted')
+      : null,
+    provider: 'simulation',
+  };
+}

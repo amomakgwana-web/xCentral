@@ -33,6 +33,13 @@ provider can disagree with them:
 | Document expiry and staleness | `verify-document` | — |
 | Composite case scoring and status | `case_score()` | `logic_tests.sql` |
 | Consent enforcement | database triggers | `logic_tests.sql` |
+| Amortisation, schedules, balloon payments | `instalment_cents()` | `lifecycle_tests.sql` |
+| Payment allocation, arrears, reversals | `allocate_payment()` | `lifecycle_tests.sql` |
+| Payment behaviour scoring | `payment_behaviour()` | `lifecycle_tests.sql` |
+| Payslip arithmetic | `check_payslip_arithmetic()` | `lifecycle_tests.sql` |
+| Address and phone normalisation | `address_fingerprint()`, `normalise_msisdn()` | `lifecycle_tests.sql` |
+| Fraud rules and linkage detection | `run_fraud_screen()` | `lifecycle_tests.sql` |
+| Credit capacity and lending limits | `assess_credit_capacity()` | `lifecycle_tests.sql` |
 
 **Requires an authority we do not have offline.** These run through the
 provider adapters in `_shared/providers.ts`:
@@ -40,6 +47,10 @@ provider adapters in `_shared/providers.ts`:
 | Check | Real provider would be |
 |---|---|
 | Does Home Affairs hold this record | DHA / HANIS |
+| Is this SIM registered to them, and when was it last swapped | Network / RICA aggregator |
+| Does this employer exist | CIPC |
+| Is this bank account theirs | Account verification service |
+| Is this vehicle clear of another financier's interest | NaTIS |
 | Is the document image genuine (tamper, security features) | A document-authentication vendor |
 | Credit bureau enquiry | TransUnion, Experian, XDS, VeriCred |
 | Face templating and liveness (PAD) | An ISO/IEC 30107-3 certified SDK |
@@ -107,6 +118,59 @@ against real data can be inspected.
 
 ---
 
+## Customer lifecycle
+
+Verification establishes who someone is. The lifecycle domains are what a
+lender or dealership does next, and they share the same schema, audit trail and
+consent register.
+
+**Customers.** A subject is someone the hub verified; a *customer* is that
+subject in an ongoing relationship with one platform. The same person can be a
+customer of the dealership and the lender without either seeing the other's
+relationship — identity is shared, commercial history is not. A customer cannot
+be created from an unverified case.
+
+**Assets and agreements.** Vehicles by VIN, handsets by IMEI, equipment by
+serial. A partial unique index refuses two live agreements against one physical
+unit, because financing the same car twice is one of the oldest frauds there is.
+Instalments, schedules and total cost of credit come from `instalment_cents()`
+and `generate_payment_schedule()` in Postgres, so what the customer is told they
+owe and what the system chases are the same numbers.
+
+**Payments.** xCentral does not collect money — BipraPay and xPayments do, and
+post each collection here. What this schema owns is the comparison: what was
+due, what arrived, and what the gap says. A debit order that presents and
+bounces is recorded as a *reversal*, not as a payment that never happened,
+because the money not being there on the day is the signal that matters.
+Allocation is oldest-instalment-first, so "three months in arrears" means one
+thing consistently.
+
+**Background vetting.** Addresses normalise to a canonical fingerprint, which is
+what makes "one address serving nine unrelated applicants" a query. Phones carry
+RICA registration and, more importantly, **SIM-swap recency** — control of the
+number is what one-time passwords rest on, and a swap days before an application
+is a takeover pattern. Employment checks the employer at CIPC and does the
+payslip arithmetic: a forger who edits the gross rarely recomputes the
+deductions.
+
+**Credit capacity.** `assess_credit_capacity()` answers "how much can this
+person be given" from four inputs, and the weakest governs. Affordability is a
+**ceiling, not an average** — no score creates money that is not there, and
+lending past it is reckless credit under NCA s80. A bureau score describes how
+they paid everyone else; payment behaviour here describes how they paid *us*,
+and can substitute for a thin file up to the policy's uplift. An open critical
+fraud signal stops the assessment entirely rather than producing a number from
+data that may be fabricated.
+
+**Fraud.** Most application fraud is not clever: the same document under two
+names, a shared address or bank account, a payslip that does not reconcile, a
+recent SIM swap, a car already financed. Every rule is a query over data the hub
+holds, stored as a row with its threshold and weight, and every signal carries
+the evidence. A critical signal raises an alert for a person — it does not
+auto-decline, because a shared address is a block of flats as often as a
+syndicate. Confirming fraud writes the identifiers to a register so the same
+entity is caught on sight next time.
+
 ## Layout
 
 ```
@@ -115,11 +179,14 @@ supabase/
   functions/
     _shared/      http, hash, auth, cases, mrz, providers
     verify-identity  verify-document  verify-credit  verify-biometric
+    customer-onboard vet-background   assess-credit-capacity
+    manage-contract  record-payment   run-fraud-screen
     platform-verify  the machine-to-machine endpoint siblings call
     case-decision    record-consent   manage-api-key  document-access
     webhook-dispatch retention-purge
   tests/          harness.sql + logic_tests.sql
   seed.sql        sandbox data, including the sibling platforms
+  seed_lifecycle.sql  customers, assets, agreements, payments, fraud fixtures
 src/              supabaseClient.js, backend.js (window.XC_DB), console.js
 index.html        the console
 ```
@@ -164,11 +231,12 @@ Function secrets:
 ## Tests
 
 ```bash
-# Schema and the arithmetic — 63 assertions
+# Schema and the arithmetic — 123 assertions across both suites
 createdb xctest
 psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/harness.sql
 for f in supabase/migrations/*.sql; do psql -d xctest -v ON_ERROR_STOP=1 -f "$f"; done
 psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/logic_tests.sql
+psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/lifecycle_tests.sql
 
 # MRZ, against the ICAO 9303 specimen documents
 node --experimental-strip-types supabase/functions/_shared/mrz.test.ts
@@ -226,7 +294,8 @@ is. The score never outvotes a definite result.
 ## Roles
 
 `super_admin`, `verification_officer`, `compliance_officer`, `credit_analyst`,
-`biometrics_officer`, `developer`, `support`, `read_only`. New staff default to
+`biometrics_officer`, `fraud_analyst`, `collections`, `dealer_admin`,
+`developer`, `support`, `read_only`. New staff default to
 `read_only` until a Super Admin assigns a real role.
 
 Permissions are checked by `has_permission()` — the same function the RLS

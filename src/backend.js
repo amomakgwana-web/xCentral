@@ -276,6 +276,112 @@ function subscribeCases(onChange) {
     .subscribe();
 }
 
+
+// ── Customers, contracts, payments, fraud ───────────────────────
+// Reads go straight to the tables; anything that decides, moves money
+// or changes a customer's standing goes through an edge function that
+// checks a permission and writes an audit entry first.
+
+const fetchCustomers = (platform) => select('customers', (q) => {
+  let query = q.order('created_at', { ascending: false }).limit(300);
+  if (platform) query = query.eq('platform_id', platform);
+  return query;
+});
+
+// The whole 360 view in one call — identity, contact, employment,
+// bureau, behaviour, portfolio, fraud and the latest credit decision.
+async function fetchCustomerProfile(customerId) {
+  const db = requireClient();
+  const { data, error } = await db.rpc('customer_profile', { p_customer_id: customerId });
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+
+async function creditCapacity(customerId, { agreementType = 'instalment_sale',
+  termMonths = 60, ratePct = 15, balloonCents = 0 } = {}) {
+  const db = requireClient();
+  const { data, error } = await db.rpc('assess_credit_capacity', {
+    p_customer_id: customerId,
+    p_agreement_type: agreementType,
+    p_term_months: termMonths,
+    p_rate_pct: ratePct,
+    p_balloon_cents: balloonCents,
+  });
+  if (error) throw error;
+  return data;
+}
+
+async function paymentBehaviour(customerId) {
+  const db = requireClient();
+  const { data, error } = await db.rpc('payment_behaviour', { p_customer_id: customerId });
+  if (error) throw error;
+  return data;
+}
+
+const fetchContracts = (opts = {}) => select('contracts', (q) => {
+  let query = q.order('created_at', { ascending: false }).limit(300);
+  if (opts.customerId) query = query.eq('customer_id', opts.customerId);
+  if (opts.status) query = query.eq('status', opts.status);
+  return query;
+});
+
+const fetchAssets = (platform) => select('assets', (q) => {
+  let query = q.order('created_at', { ascending: false }).limit(300);
+  if (platform) query = query.eq('platform_id', platform);
+  return query;
+});
+
+const fetchSchedule = (contractId) => select('payment_schedule',
+  (q) => q.eq('contract_id', contractId).order('instalment_no'));
+
+const fetchPayments = (opts = {}) => select('payments', (q) => {
+  let query = q.order('paid_at', { ascending: false }).limit(opts.limit ?? 200);
+  if (opts.contractId) query = query.eq('contract_id', opts.contractId);
+  if (opts.customerId) query = query.eq('customer_id', opts.customerId);
+  return query;
+});
+
+const fetchFraudAlerts = (status) => select('fraud_alerts', (q) => {
+  let query = q.order('created_at', { ascending: false }).limit(200);
+  if (status) query = query.eq('status', status);
+  return query;
+});
+
+const fetchFraudSignals = (opts = {}) => select('fraud_signals', (q) => {
+  let query = q.eq('dismissed', false).order('created_at', { ascending: false }).limit(300);
+  if (opts.customerId) query = query.eq('customer_id', opts.customerId);
+  if (opts.caseId) query = query.eq('case_id', opts.caseId);
+  return query;
+});
+
+const fetchFraudRules = () => select('fraud_rules', (q) => q.eq('active', true).order('domain'));
+const fetchCreditPolicies = () => select('credit_policies', (q) => q.eq('active', true).order('platform_id'));
+const fetchAddresses = (customerId) => select('addresses', (q) => q.eq('customer_id', customerId));
+const fetchPhones = (customerId) => select('phone_numbers', (q) => q.eq('customer_id', customerId));
+const fetchEmployment = (customerId) => select('employment_records', (q) => q.eq('customer_id', customerId));
+const fetchAssessments = (customerId) => select('credit_assessments',
+  (q) => q.eq('customer_id', customerId).order('created_at', { ascending: false }));
+
+const onboardCustomer   = (payload) => invoke('customer-onboard', payload);
+const vetBackground     = (payload) => invoke('vet-background', payload);
+const assessCapacity    = (payload) => invoke('assess-credit-capacity', payload);
+const createContract    = (payload) => invoke('manage-contract', { action: 'create', ...payload });
+const activateContract  = (contractId) => invoke('manage-contract', { action: 'activate', contractId });
+const screenForFraud    = (payload) => invoke('run-fraud-screen', { action: 'screen', ...payload });
+const dismissFraudSignal= (signalId, reason) => invoke('run-fraud-screen', { action: 'dismiss_signal', signalId, reason });
+const resolveFraudAlert = (alertId, outcome, note) => invoke('run-fraud-screen', { action: 'resolve_alert', alertId, outcome, note });
+
+// Arrears book: every contract behind, worst first. What a collections
+// desk opens the morning on.
+async function fetchArrearsBook() {
+  const rows = await select('contracts', (q) => q
+    .in('status', ['in_arrears', 'defaulted', 'legal'])
+    .order('months_in_arrears', { ascending: false })
+    .limit(200));
+  return rows;
+}
+
 window.XC_DB = {
   env: XC_ENV,
   configured: XC_CONFIGURED,
@@ -321,6 +427,35 @@ window.XC_DB = {
   fetchBureaus,
   fetchDocumentTypes,
   subscribeCases,
+
+  // Customer lifecycle
+  fetchCustomers,
+  fetchCustomerProfile,
+  creditCapacity,
+  paymentBehaviour,
+  fetchContracts,
+  fetchAssets,
+  fetchSchedule,
+  fetchPayments,
+  fetchArrearsBook,
+  fetchAddresses,
+  fetchPhones,
+  fetchEmployment,
+  fetchAssessments,
+  fetchCreditPolicies,
+  onboardCustomer,
+  vetBackground,
+  assessCapacity,
+  createContract,
+  activateContract,
+
+  // Fraud
+  fetchFraudAlerts,
+  fetchFraudSignals,
+  fetchFraudRules,
+  screenForFraud,
+  dismissFraudSignal,
+  resolveFraudAlert,
 };
 
 window.dispatchEvent(new Event('xc-db-ready'));

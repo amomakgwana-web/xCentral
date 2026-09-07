@@ -22,5 +22,10 @@ for f in supabase/migrations/*.sql; do
 done
 
 echo
-psql -v ON_ERROR_STOP=1 -d "$DB" -f supabase/tests/logic_tests.sql 2>&1 \
-  | sed -n 's/^psql:[^ ]* NOTICE:  //p'
+# Both suites. pipefail is set above, so a raised assertion propagates
+# as a non-zero exit rather than being swallowed by the formatting pipe.
+for suite in supabase/tests/logic_tests.sql supabase/tests/lifecycle_tests.sql; do
+  echo "  --- $(basename "$suite") ---"
+  psql -v ON_ERROR_STOP=1 -d "$DB" -f "$suite" 2>&1 \
+    | sed -n 's/^psql:[^ ]* NOTICE:  //p'
+done

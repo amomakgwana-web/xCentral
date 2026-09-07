@@ -129,6 +129,8 @@ tbody tr.clickable{cursor:pointer}
 tbody tr.clickable:hover{background:var(--bg)}
 .mono{font-family:var(--mono);font-size:11.5px;font-variant-numeric:tabular-nums}
 .muted{color:var(--ink4)}
+/* A money figure that represents money owed, not money held. */
+.arrears{color:var(--red);font-weight:600}
 .badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:20px;
   font-size:10.5px;font-weight:700;border:1px solid;white-space:nowrap}
 .b-verified,.b-passed,.b-active,.b-completed,.b-delivered,.b-low,.b-affordable{background:var(--gr-bg);color:var(--gr2);border-color:var(--gr-bd)}
@@ -192,6 +194,9 @@ tbody tr.clickable:hover{background:var(--bg)}
 .modal.open{display:flex}
 .modal-box{background:var(--white);border-radius:var(--r3);box-shadow:var(--shadow-lg);width:100%;max-width:540px;
   max-height:88vh;display:flex;flex-direction:column}
+/* A customer profile carries identity, contact, capacity, three score
+   tiles and a contract table — it needs the room to lay them out. */
+.modal.wide .modal-box{max-width:920px}
 .modal-hdr{padding:15px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
 .modal-title{font-size:14px;font-weight:700}
 .modal-x{margin-left:auto;width:26px;height:26px;border:none;background:transparent;border-radius:6px;
