@@ -382,6 +382,60 @@ async function fetchArrearsBook() {
   return rows;
 }
 
+
+// ── Live capture and agent adjudication ─────────────────────────
+// The capture module itself (camera, quality maths, WebAuthn) is
+// src/capture.js and runs entirely in the browser. These are the calls
+// that carry its output to the hub.
+
+const openCaptureSession  = (payload) => invoke('capture-intake', { action: 'open', ...payload });
+const abandonCaptureSession = (sessionId, reason) => invoke('capture-intake', { action: 'abandon', sessionId, reason });
+const submitCapture       = (payload) => invoke('capture-intake', payload);
+const adjudicate          = (payload) => invoke('agent-adjudicate', { action: 'adjudicate', ...payload });
+const applyAgentDecision  = (runId, outcome, reason) => invoke('agent-adjudicate', { action: 'decide', runId, outcome, reason });
+
+const fetchCaptureSessions = (status) => select('capture_sessions', (q) => {
+  let query = q.order('started_at', { ascending: false }).limit(100);
+  if (status) query = query.eq('status', status);
+  return query;
+});
+
+const fetchCaptures = (sessionId) => select('captures',
+  (q) => q.eq('session_id', sessionId).order('created_at'));
+
+const fetchAgents = () => select('agents', (q) => q.eq('active', true).order('domain'));
+
+const fetchAgentRuns = (opts = {}) => select('agent_runs', (q) => {
+  let query = q.order('created_at', { ascending: false }).limit(100);
+  if (opts.sessionId) query = query.eq('session_id', opts.sessionId);
+  if (opts.caseId) query = query.eq('case_id', opts.caseId);
+  return query;
+});
+
+const fetchAgentDecisions = (runId) => select('agent_decisions',
+  (q) => q.eq('run_id', runId).order('created_at'));
+
+const fetchQualityRules = () => select('capture_quality_rules',
+  (q) => q.eq('active', true).order('capture_type'));
+
+// Assesses capture quality against the same rules the pipeline uses,
+// so the wizard can tell an operator to retake before anything is sent.
+async function checkCaptureQuality(captureType, m) {
+  const db = requireClient();
+  const { data, error } = await db.rpc('assess_capture_quality', {
+    p_capture_type: captureType,
+    p_sharpness: m.sharpness ?? null,
+    p_brightness: m.brightness ?? null,
+    p_contrast: m.contrast ?? null,
+    p_width: m.width ?? null,
+    p_height: m.height ?? null,
+    p_face_count: m.faceCount ?? null,
+    p_face_area_pct: m.faceAreaPct ?? null,
+  });
+  if (error) throw error;
+  return data;
+}
+
 window.XC_DB = {
   env: XC_ENV,
   configured: XC_CONFIGURED,
@@ -448,6 +502,20 @@ window.XC_DB = {
   assessCapacity,
   createContract,
   activateContract,
+
+  // Live capture and agents
+  openCaptureSession,
+  abandonCaptureSession,
+  submitCapture,
+  adjudicate,
+  applyAgentDecision,
+  fetchCaptureSessions,
+  fetchCaptures,
+  fetchAgents,
+  fetchAgentRuns,
+  fetchAgentDecisions,
+  fetchQualityRules,
+  checkCaptureQuality,
 
   // Fraud
   fetchFraudAlerts,

@@ -40,6 +40,9 @@ provider can disagree with them:
 | Address and phone normalisation | `address_fingerprint()`, `normalise_msisdn()` | `lifecycle_tests.sql` |
 | Fraud rules and linkage detection | `run_fraud_screen()` | `lifecycle_tests.sql` |
 | Credit capacity and lending limits | `assess_credit_capacity()` | `lifecycle_tests.sql` |
+| Image quality — sharpness, brightness, contrast | `src/capture.js` | `tests/capture-metrics.html` |
+| Capture quality gate and remedies | `assess_capture_quality()` | `capture_tests.sql` |
+| Capture session state machine | `complete_capture_step()` | `capture_tests.sql` |
 
 **Requires an authority we do not have offline.** These run through the
 provider adapters in `_shared/providers.ts`:
@@ -51,6 +54,8 @@ provider adapters in `_shared/providers.ts`:
 | Does this employer exist | CIPC |
 | Is this bank account theirs | Account verification service |
 | Is this vehicle clear of another financier's interest | NaTIS |
+| Face templating and matching | An ISO/IEC 30107-3 certified biometric SDK |
+| Fingerprint capture beyond the device's own sensor | A scanner SDK |
 | Is the document image genuine (tamper, security features) | A document-authentication vendor |
 | Credit bureau enquiry | TransUnion, Experian, XDS, VeriCred |
 | Face templating and liveness (PAD) | An ISO/IEC 30107-3 certified SDK |
@@ -171,6 +176,72 @@ auto-decline, because a shared address is a block of flats as often as a
 syndicate. Confirming fraud writes the identifiers to a register so the same
 entity is caught on sight next time.
 
+## Live capture and onboarding
+
+A wizard that runs the counter flow: scan the identity document, photograph the
+person in front of you, capture a fingerprint, match the two faces, and put it
+to the agents.
+
+**What is computed in the browser, from the actual pixels** (`src/capture.js`):
+
+| Metric | How |
+|---|---|
+| Sharpness | Variance of the Laplacian — a blurred image has little high-frequency content |
+| Brightness | Mean luminance, 0-100 |
+| Contrast | Standard deviation of luminance; a photo of a screen reads low |
+| Faces | Shape Detection API where the browser has it |
+| Motion | Inter-frame difference across a short burst — a held-up photograph barely changes |
+
+Quality is assessed **before** anything is templated or matched, and a capture
+below the bar is refused with a remedy an operator can act on ("move somewhere
+brighter") rather than a code. Most failed matches are failed photographs, and
+telling someone "no match" when the answer is "too dark" produces the wrong
+action.
+
+A browser without the Shape Detection API produces an **advisory**, not a
+failure — it lowers confidence and is recorded, but never blocks. A capability
+gap in the browser is not a defect in the photograph.
+
+**Fingerprints, honestly.** A browser cannot read a fingerprint scanner.
+WebAuthn asks the *device* to verify its owner with its own sensor and returns a
+signed assertion. The template never leaves the secure element — neither the
+page nor the hub ever sees it. So this proves *the enrolled owner of that device
+was present*, not that a particular person's finger was. AFIS-grade capture
+needs a scanner SDK behind the provider interface. The distinction is preserved
+in the schema, the API responses and the UI copy.
+
+**Face matching** is a provider call. Comparing two faces needs a model trained
+for it; this module's job is to make sure what it sends is worth comparing.
+
+## The agents
+
+Six agents plus an orchestrator. Each owns one question, forms its own verdict
+from the check data the pipeline produced, writes its rationale in plain words,
+and some can veto.
+
+| Agent | Question | Veto |
+|---|---|---|
+| Identity | Is the identity well-formed, real, alive, and not on a list? | yes |
+| Document | Is the document genuine, current, and does it belong to this person? | yes |
+| Biometric | Is the person at the camera the person on the document, and were they present? | yes |
+| Fraud | Does anything here link to a pattern we have seen before? | yes |
+| Affordability | Can this person carry what they are asking for, under the NCA? | no |
+| Compliance | Is there lawful basis for everything we have done? | yes |
+
+**These are deterministic reasoners, not language models.** Every shipped agent
+applies a stated policy to stored data, and the `reasoning` column records which
+kind each is — so a model-backed agent added later is a visible change, asserted
+by a test. That is deliberate: a lending decision has to be reproducible and
+explainable to the NCR, and "the model said so" is neither.
+
+The orchestrator **arbitrates rather than averages**. A veto is decisive;
+averaging a failed identity check against a good affordability score would
+produce a number that means nothing. Three or more abstentions is a *refer*, not
+an approval — six agents that mostly had nothing to read is a thin file.
+
+A recommendation is never applied automatically. A person accepts or overrides
+it, and the override is recorded against their account with a reason.
+
 ## Layout
 
 ```
@@ -181,6 +252,7 @@ supabase/
     verify-identity  verify-document  verify-credit  verify-biometric
     customer-onboard vet-background   assess-credit-capacity
     manage-contract  record-payment   run-fraud-screen
+    capture-intake   agent-adjudicate
     platform-verify  the machine-to-machine endpoint siblings call
     case-decision    record-consent   manage-api-key  document-access
     webhook-dispatch retention-purge
@@ -188,6 +260,8 @@ supabase/
   seed.sql        sandbox data, including the sibling platforms
   seed_lifecycle.sql  customers, assets, agreements, payments, fraud fixtures
 src/              supabaseClient.js, backend.js (window.XC_DB), console.js
+                  capture.js — camera, image quality, liveness, WebAuthn
+tests/            browser tests for the capture maths and the wizard
 index.html        the console
 ```
 
@@ -231,15 +305,22 @@ Function secrets:
 ## Tests
 
 ```bash
-# Schema and the arithmetic — 123 assertions across both suites
+# Schema and the arithmetic — 154 assertions across three suites
 createdb xctest
 psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/harness.sql
 for f in supabase/migrations/*.sql; do psql -d xctest -v ON_ERROR_STOP=1 -f "$f"; done
 psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/logic_tests.sql
 psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/lifecycle_tests.sql
+psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/capture_tests.sql
 
 # MRZ, against the ICAO 9303 specimen documents
 node --experimental-strip-types supabase/functions/_shared/mrz.test.ts
+
+# Image-quality maths, in a real browser against synthetic images
+node tests/run-capture-metrics.mjs
+
+# The whole capture wizard, driven by Chromium's synthetic camera
+npm run build && node tests/run-onboarding-wizard.mjs
 ```
 
 `harness.sql` recreates just enough of a Supabase project (`auth.users`,

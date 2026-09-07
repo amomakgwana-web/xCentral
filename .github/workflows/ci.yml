@@ -146,3 +146,18 @@ jobs:
 
       - name: Console builds
         run: npm run build
+
+      # The image-quality maths decide whether a capture is usable, so
+      # a regression there silently degrades every face match. Runs in
+      # real Chromium against synthetic images with known properties.
+      # playwright-core drives a browser but does not download one, so
+      # fetch Chromium into the registry the tests resolve from.
+      - name: Install Chromium
+        run: npx --yes playwright@1.63.0 install --with-deps chromium
+
+      - name: Capture quality maths
+        run: node tests/run-capture-metrics.mjs
+
+      # The whole capture wizard, driven by Chromium's synthetic camera.
+      - name: Onboarding wizard end to end
+        run: node tests/run-onboarding-wizard.mjs
