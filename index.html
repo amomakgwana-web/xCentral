@@ -331,5 +331,77 @@ tbody tr.clickable:hover{background:var(--bg)}
 <div id="toasts"></div>
 
 <script type="module" src="/src/console.js"></script>
+
+<script>
+// ── Boot guard ──────────────────────────────────────────────────
+// The console is an ES module graph. If that graph fails to load —
+// most often because the app is being served by a plain static server
+// rather than Vite, so the browser cannot resolve a bare npm import —
+// the page would otherwise render its header and then nothing at all,
+// with the reason only visible in the developer console.
+//
+// This is a classic script on purpose: it still runs when module
+// loading is the thing that broke.
+(function () {
+  var firstError = null;
+  window.addEventListener('error', function (e) {
+    if (!firstError && e.message) firstError = e.message;
+  }, true);
+
+  function diagnose() {
+    // The nav is populated by console.js. Empty after this long means
+    // the console never booted.
+    var nav = document.getElementById('nav');
+    if (!nav || nav.children.length > 0) return;
+
+    var bareImport = firstError && /resolve module specifier|Failed to fetch dynamically imported/i.test(firstError);
+
+    document.getElementById('main').innerHTML =
+      '<div class="page active"><div class="page-hdr"><div>'
+      + '<div class="ph-title">The console did not start</div>'
+      + '<div class="ph-sub">Its JavaScript failed to load, so nothing below the header rendered</div>'
+      + '</div></div><div class="pad">'
+      + '<div class="note note-danger"><b>'
+      + (bareImport
+          ? 'This looks like the app being served without Vite.'
+          : 'The app bundle failed to load.')
+      + '</b><br>'
+      + (bareImport
+          ? 'The console imports packages by name (for example <span class="mono">@supabase/supabase-js'
+            + '</span>). A browser cannot resolve those on its own — the dev server or a production '
+            + 'build has to do it. Opening <span class="mono">index.html</span> directly, or serving '
+            + 'the folder with a plain static server, will always produce this blank page.'
+          : 'Something stopped the module graph from loading.')
+      + '</div>'
+      + '<div class="card"><div class="card-hdr"><div><div class="card-title">How to run it</div>'
+      + '<div class="card-sub">Either of these works; the first is what you want while developing</div>'
+      + '</div></div><div class="card-body">'
+      + '<div class="code">npm install\nnpm run dev\n<span class="c"># then open http://localhost:5173</span>'
+      + '\n\n<span class="c"># or build once and serve the output:</span>'
+      + '\nnpm run build\nnpx vite preview</div>'
+      + '<div class="note note-info">The camera in the capture wizard needs a secure context. '
+      + '<span class="mono">localhost</span> counts as one; a plain-HTTP LAN address such as '
+      + '<span class="mono">192.168.x.x</span> does not, and <span class="mono">getUserMedia</span> '
+      + 'will refuse there.</div>'
+      + '</div></div>'
+      + (firstError
+          ? '<div class="card"><div class="card-hdr"><div><div class="card-title">What the browser reported</div>'
+            + '</div></div><div class="card-body"><div class="code" style="white-space:pre-wrap">'
+            + String(firstError).replace(/[&<>]/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c];
+              })
+            + '</div></div></div>'
+          : '')
+      + '</div></div>';
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { setTimeout(diagnose, 2500); });
+  } else {
+    setTimeout(diagnose, 2500);
+  }
+})();
+</script>
+
 </body>
 </html>
