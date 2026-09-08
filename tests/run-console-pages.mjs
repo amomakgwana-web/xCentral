@@ -216,6 +216,24 @@ for (const spec of PAGES) {
   await page.evaluate(() => window.closeModal());
 }
 
+// ── Row level security is actually in force ─────────────────────
+// The assertion that would have caught the shim running as superuser:
+// biometric_templates has RLS enabled and no policies at all, so every
+// client role must see zero rows however many are stored. If this ever
+// returns rows, the harness is privileged and every page above passed
+// for the wrong reason.
+{
+  const seen = await page.evaluate(async () => {
+    const res = await fetch('/rest/v1/biometric_templates?select=*', {
+      headers: { accept: 'application/json' },
+    });
+    return { status: res.status, rows: (await res.json()).length ?? null };
+  });
+  if (seen.status !== 200) fail(`biometric_templates returned ${seen.status}, expected 200`);
+  else if (seen.rows !== 0) fail(`biometric_templates returned ${seen.rows} rows to a client role — RLS is not in force`);
+  else pass('biometric templates are invisible to the console, so RLS is in force');
+}
+
 // ── The shim itself must not have papered over anything ─────────
 if (shim.failures.length) {
   for (const f of shim.failures) fail(`shim: ${f}`);

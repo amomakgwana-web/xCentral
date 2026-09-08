@@ -111,8 +111,20 @@ export async function startShim({ databaseUrl, distDir, port = 0, role = 'authen
     queries.push(sql);
     const client = await pool.connect();
     try {
+      // The transaction is not optional: SET LOCAL outside one is a
+      // no-op that Postgres only warns about, which would leave every
+      // query running as the connection's own superuser and silently
+      // bypass every policy this test claims to exercise. Wrapping it
+      // also means the role cannot leak to the next caller of a pooled
+      // connection.
+      await client.query('begin');
       await client.query(`set local role ${role}`);
-      return await client.query(sql, params);
+      const result = await client.query(sql, params);
+      await client.query('commit');
+      return result;
+    } catch (e) {
+      await client.query('rollback').catch(() => {});
+      throw e;
     } finally {
       client.release();
     }
