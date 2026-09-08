@@ -65,6 +65,11 @@ await page.addInitScript(() => {
     hasPermission: async () => true,
     fetchPlatforms: async () => ([{id:'biprapay',name:'BipraPay'},{id:'xpayments',name:'xPayments'}]),
     fetchCases: async () => [], fetchDashboard: async () => ({total:0,byStatus:{},verified:0,passRate:null,needsReview:0,inProgress:0,recent:[]}),
+    // The capture page also lists sessions already adjudicated. Empty
+    // here on purpose: this test is about the live wizard, and the
+    // history is covered by tests/run-console-pages.mjs against real
+    // seeded rows.
+    fetchCaptureSessions: async () => [], fetchAgentRuns: async () => [],
     validateSaId: async () => ({valid:true,date_of_birth:'1990-01-01',age:36,gender:'male',citizenship:'citizen',reason_codes:[]}),
 
     verifyIdentity: async (a) => { rec('verifyIdentity', a);

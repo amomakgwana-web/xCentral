@@ -262,7 +262,8 @@ supabase/
   seed_demo.sql   the demonstration cohort — 24 people, 32 cases, 20 agreements
 src/              supabaseClient.js, backend.js (window.XC_DB), console.js
                   capture.js — camera, image quality, liveness, WebAuthn
-tests/            browser tests for the capture maths and the wizard
+tests/            browser tests for the capture maths, the wizard, and
+                  every console page against a real seeded database
 index.html        the console
 ```
 
@@ -332,7 +333,7 @@ Function secrets:
 ## Tests
 
 ```bash
-# Schema and the arithmetic — 154 assertions across three suites
+# Schema and the arithmetic — 170 assertions across three suites
 createdb xctest
 psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/harness.sql
 for f in supabase/migrations/*.sql; do psql -d xctest -v ON_ERROR_STOP=1 -f "$f"; done
@@ -348,11 +349,33 @@ node tests/run-capture-metrics.mjs
 
 # The whole capture wizard, driven by Chromium's synthetic camera
 npm run build && node tests/run-onboarding-wizard.mjs
+
+# Every console page, rendered by the shipped bundle from real seeded
+# rows. Needs a database with the migrations and all three seeds, and a
+# bundle built pointing at the shim's port.
+VITE_SUPABASE_URL_SANDBOX=http://127.0.0.1:4187 \
+VITE_SUPABASE_KEY_SANDBOX=sb_publishable_shim_not_a_real_key \
+  npm run build
+DATABASE_URL=postgresql://…/xcdemo npm run test:console
 ```
 
 `harness.sql` recreates just enough of a Supabase project (`auth.users`,
 `storage.buckets`, the `anon`/`authenticated`/`service_role` roles) for the
 migrations to run against stock Postgres. It is not deployed.
+
+`tests/postgrest-shim.mjs` is the other half of that arrangement: a
+deliberately small stand-in for Supabase's REST layer, speaking exactly the
+subset of PostgREST `src/backend.js` uses and returning **501 for anything
+else** rather than guessing. That refusal is the point — a shim that quietly
+answered a query it did not really understand would make a passing test
+meaningless. It runs every query as the `authenticated` role, so a page that
+renders does so because row level security allows it.
+
+What that test catches which nothing else does: the SQL suites prove the
+functions compute the right numbers and CI proves no table backing a page is
+empty, but neither proves the console can *render* what is in those tables. A
+null where `console.js` expects a string produces an error panel, and every
+other suite stays green.
 
 ---
 

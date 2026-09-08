@@ -144,6 +144,30 @@ jobs:
     name: Parser and bundle
     runs-on: ubuntu-latest
 
+    # The console test needs both a browser and a database: it drives
+    # the shipped bundle in Chromium while backend.js's real queries go
+    # to a real seeded Postgres through tests/postgrest-shim.mjs.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
     steps:
       - uses: actions/checkout@v4
 
@@ -196,3 +220,42 @@ jobs:
       # The whole capture wizard, driven by Chromium's synthetic camera.
       - name: Onboarding wizard end to end
         run: node tests/run-onboarding-wizard.mjs
+
+      # Everything above proves the arithmetic and the parts. This
+      # proves the thing a person actually looks at: sixteen pages, a
+      # case, a customer profile and a stored adjudication, rendered by
+      # the shipped bundle from real seeded rows. A null where the
+      # console expects a string renders an error panel, and every
+      # other suite here would still be green.
+      - name: Install the Postgres client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Seed a database for the console
+        run: |
+          createdb xcconsole
+          psql -v ON_ERROR_STOP=1 -q -d xcconsole -f supabase/tests/harness.sql
+          for f in supabase/migrations/*.sql; do
+            psql -v ON_ERROR_STOP=1 -q -d xcconsole -f "$f"
+          done
+          for f in supabase/seed.sql supabase/seed_lifecycle.sql supabase/seed_demo.sql; do
+            psql -v ON_ERROR_STOP=1 -q -d xcconsole -f "$f"
+          done
+          # Supabase grants these to the authenticated role by default;
+          # a bare Postgres does not, and the shim queries as that role
+          # so row level security is exercised rather than bypassed.
+          psql -v ON_ERROR_STOP=1 -q -d xcconsole -c "
+            grant usage on schema public to authenticated;
+            grant select on all tables in schema public to authenticated;"
+
+      # The Supabase URL is inlined by Vite at build time, so the
+      # bundle under test has to be built pointing at the shim.
+      - name: Console pages render the seeded data
+        env:
+          VITE_SUPABASE_URL_SANDBOX: http://127.0.0.1:4187
+          VITE_SUPABASE_KEY_SANDBOX: sb_publishable_shim_not_a_real_key
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/xcconsole
+        run: |
+          npm run build
+          node tests/run-console-pages.mjs

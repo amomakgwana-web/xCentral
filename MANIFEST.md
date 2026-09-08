@@ -77,15 +77,21 @@ supabase/
   seed_demo.sql                the demonstration cohort, at demo volume
   tests/harness.sql            stands in for a Supabase project on stock Postgres
   tests/logic_tests.sql        63 assertions
-  tests/lifecycle_tests.sql    60 assertions
+  tests/lifecycle_tests.sql    73 assertions
   tests/capture_tests.sql      34 assertions
 
 tests/
   capture-metrics.html         image-quality maths vs synthetic images
   run-capture-metrics.mjs      runs the above in headless Chromium
   run-onboarding-wizard.mjs    the whole wizard, on Chromium's synthetic camera
+  postgrest-shim.mjs           a small stand-in for Supabase's REST layer,
+                               501 on anything it does not truly implement
+  run-console-pages.mjs        every console page, plus a case, a customer
+                               profile and a stored adjudication, rendered by
+                               the shipped bundle from real seeded rows
 
 scripts/test-db.sh             applies the schema and runs all three SQL suites
+scripts/seed-demo.sh           loads all three seeds in order, with a summary
 .github/workflows/ci.yml       both jobs, on every push
 ```
 

@@ -11,9 +11,11 @@
     "test:mrz": "node --experimental-strip-types supabase/functions/_shared/mrz.test.ts",
     "test:db": "./scripts/test-db.sh",
     "test:capture": "node tests/run-capture-metrics.mjs",
-    "test:wizard": "npm run build && node tests/run-onboarding-wizard.mjs"
+    "test:wizard": "npm run build && node tests/run-onboarding-wizard.mjs",
+    "test:console": "node tests/run-console-pages.mjs"
   },
   "devDependencies": {
+    "pg": "^8.23.0",
     "playwright-core": "^1.63.0",
     "vite": "^5.4.11"
   },

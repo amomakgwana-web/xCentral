@@ -28,6 +28,16 @@ const titleCase = (s) => {
 };
 
 const badge = (v) => v ? `<span class="badge b-${esc(v)}">${esc(titleCase(v))}</span>` : '<span class="muted">—</span>';
+
+// badge() takes one value and uses it for both the colour and the
+// wording, which is right only when the value is the word to show. It
+// often is not: a fraud rule in the "address" domain has no colour of
+// its own, so the colour has to be borrowed from another vocabulary —
+// and badge() then prints that borrowed word. chip() takes the two
+// separately, so the reader sees "Address", not "Biometric Address".
+const chip = (tone, label) => label
+  ? `<span class="badge b-${esc(tone)}">${esc(titleCase(label))}</span>`
+  : '<span class="muted">—</span>';
 const meter = (score) => {
   if (score === null || score === undefined) return '<span class="muted">—</span>';
   const cls = score >= 80 ? '' : score >= 55 ? 'mid' : 'low';
@@ -800,8 +810,8 @@ RENDER.watchlist = async () => {
     <table><thead><tr><th>Name</th><th>List</th><th>Type</th><th>Country</th><th>Aliases</th></tr></thead><tbody>
       ${entries.map((e) => `<tr>
         <td><b>${esc(e.full_name)}</b></td><td>${esc(e.list_name)}</td>
-        <td>${badge(e.entry_type === 'sanction' ? 'rejected' : e.entry_type === 'pep' ? 'review' : 'none')}
-          <span class="muted" style="font-size:10.5px">${esc(titleCase(e.entry_type))}</span></td>
+        <td>${chip(e.entry_type === 'sanction' ? 'rejected'
+            : e.entry_type === 'pep' ? 'review' : 'none', e.entry_type)}</td>
         <td class="mono">${esc(e.country ?? '—')}</td>
         <td class="muted">${esc((e.aliases ?? []).join(', ') || '—')}</td></tr>`).join('')
         || `<tr><td colspan="5">${emptyState('No watchlist entries loaded.')}</td></tr>`}
@@ -819,8 +829,7 @@ RENDER.platforms = async () => {
   const platformRows = platforms.map((p) => `
     <tr>
       <td><b>${esc(p.name)}</b><div class="mono muted" style="font-size:10.5px">${esc(p.id)}</div></td>
-      <td>${badge(p.environment === 'production' ? 'verified' : 'pending')}
-        <span class="muted" style="font-size:10.5px">${esc(titleCase(p.environment))}</span></td>
+      <td>${chip(p.environment === 'production' ? 'verified' : 'pending', p.environment)}</td>
       <td>${badge(p.status)}</td>
       <td>${(p.allowed_domains ?? []).map((d) => `<span class="badge b-${esc(d)}">${esc(titleCase(d))}</span>`).join(' ')}</td>
       <td class="muted">${esc(p.responsible_party ?? '—')}</td>
@@ -1175,7 +1184,16 @@ async function openCustomer(customerId) {
           <div class="stat-lbl">Payment behaviour</div>
           <div class="stat-val">${b.score ?? '—'}</div>
           <div class="stat-meta">${b.has_history
-            ? esc(b.on_time_pct) + '% on time · ' + esc(b.reversals) + ' reversal(s)'
+            // On-time percentage alone cannot explain the score: a
+            // customer who paid every instalment a fortnight late and
+            // one who paid nothing are both 0% on time, and they do not
+            // score the same. Say what actually happened.
+            ? [
+                `${esc(b.paid_on_time ?? 0)}/${esc(b.instalments_due ?? 0)} on time`,
+                (b.paid_late ?? 0) ? `${esc(b.paid_late)} late` : '',
+                (b.missed_or_short ?? 0) ? `${esc(b.missed_or_short)} missed` : '',
+                (b.reversals ?? 0) ? `${esc(b.reversals)} reversed` : '',
+              ].filter(Boolean).join(' · ')
             : 'No history on this platform'}</div>
         </div>
         <div class="stat ${(p.fraud?.highest_score ?? 0) >= 45 ? 'red' : (p.fraud?.highest_score ?? 0) > 0 ? 'amber' : 'green'}">
@@ -1255,8 +1273,7 @@ RENDER.portfolio = async () => {
     <tr>
       <td><b>${esc([a.make, a.model].filter(Boolean).join(' '))}</b>
         <div class="muted" style="font-size:10.5px">${esc(a.variant ?? '')} ${a.year ? esc(a.year) : ''}</div></td>
-      <td>${badge(a.asset_type.startsWith('vehicle') ? 'identity' : 'document')}
-        <span class="muted" style="font-size:10.5px">${esc(titleCase(a.asset_type))}</span></td>
+      <td>${chip(a.asset_type.startsWith('vehicle') ? 'identity' : 'document', a.asset_type)}</td>
       <td class="mono muted">${esc(a.vin ?? a.imei ?? a.serial_number ?? '—')}</td>
       <td class="mono muted">${esc(a.registration_number ?? '—')}</td>
       <td class="mono">${fmtRand(a.retail_value_cents)}</td>
@@ -1322,9 +1339,8 @@ async function openContract(contractId) {
         <td class="muted">${fmtDate(s.due_date)}</td>
         <td class="mono">${fmtRand(s.amount_due_cents)}</td>
         <td class="mono">${fmtRand(s.amount_paid_cents)}</td>
-        <td>${badge(s.status === 'paid' ? 'passed' : s.status === 'missed' ? 'failed'
-              : s.status === 'partial' ? 'review' : 'pending')}
-          <span class="muted" style="font-size:10.5px">${esc(titleCase(s.status))}</span></td>
+        <td>${chip(s.status === 'paid' ? 'passed' : s.status === 'missed' ? 'failed'
+              : s.status === 'partial' ? 'review' : 'pending', s.status)}</td>
         <td class="muted">${fmtDate(s.paid_on)}</td>
       </tr>`).join('');
 
@@ -1462,15 +1478,13 @@ RENDER.fraud = async () => {
 
   const alertRows = alerts.length ? alerts.map((a) => `
     <tr class="clickable" data-alert="${esc(a.id)}">
-      <td>${badge(a.severity === 'critical' || a.severity === 'high' ? 'failed'
-            : a.severity === 'medium' ? 'review' : 'passed')}
-        <span class="muted" style="font-size:10.5px">${esc(titleCase(a.severity))}</span></td>
+      <td>${chip(a.severity === 'critical' || a.severity === 'high' ? 'failed'
+            : a.severity === 'medium' ? 'review' : 'passed', a.severity)}</td>
       <td class="mono">${a.score}</td>
       <td>${esc(custById.get(a.customer_id)?.customer_number ?? a.case_id ?? '—')}</td>
       <td class="mono">${a.signal_count} <span class="muted">(${a.critical_count} critical)</span></td>
-      <td>${badge(a.status === 'confirmed_fraud' ? 'failed'
-            : a.status === 'false_positive' ? 'passed' : 'review')}
-        <span class="muted" style="font-size:10.5px">${esc(titleCase(a.status))}</span></td>
+      <td>${chip(a.status === 'confirmed_fraud' ? 'failed'
+            : a.status === 'false_positive' ? 'passed' : 'review', a.status)}</td>
       <td class="muted">${fmtDateTime(a.created_at)}</td>
     </tr>`).join('') : `<tr><td colspan="6">${emptyState('No alerts raised.')}</td></tr>`;
 
@@ -1480,10 +1494,11 @@ RENDER.fraud = async () => {
     <tr>
       <td><b>${esc(r.name)}</b>
         <div class="muted" style="font-size:10.5px;max-width:520px">${esc(r.description)}</div></td>
-      <td>${badge(r.domain === 'document' ? 'document' : r.domain === 'identity' ? 'identity'
-            : r.domain === 'employment' || r.domain === 'banking' ? 'credit' : 'biometric')}
-        <span class="muted" style="font-size:10.5px">${esc(titleCase(r.domain))}</span></td>
-      <td>${badge(r.severity === 'critical' ? 'failed' : r.severity === 'warn' ? 'review' : 'passed')}</td>
+      <td>${chip(r.domain === 'document' ? 'document' : r.domain === 'identity' ? 'identity'
+            : r.domain === 'employment' || r.domain === 'banking' ? 'credit' : 'biometric',
+            r.domain)}</td>
+      <td>${chip(r.severity === 'critical' ? 'failed' : r.severity === 'warn' ? 'review' : 'passed',
+            r.severity)}</td>
       <td class="mono">${esc(r.weight)}</td>
       <td class="mono">${byRule[r.code] ?? 0}</td>
     </tr>`).join('');
@@ -1729,7 +1744,17 @@ RENDER.onboard = async () => {
   const lib = await captureLib();
   const hasCamera = lib.cameraAvailable();
   const hasFaceApi = lib.faceDetectionAvailable();
-  const platforms = await DB.fetchPlatforms();
+  // Sessions already adjudicated are shown below the wizard. Without
+  // this the agents can only be seen by running a live capture, which
+  // makes the most explainable part of the system the hardest to look
+  // at — and impossible to review after the fact.
+  const [platforms, sessions, runs, name] = await Promise.all([
+    DB.fetchPlatforms(),
+    DB.fetchCaptureSessions().catch(() => []),
+    DB.fetchAgentRuns().catch(() => []),
+    platformName(),
+  ]);
+  const runByKey = new Map(runs.filter((r) => r.session_id).map((r) => [r.session_id, r]));
 
   return `
   ${stepRail()}
@@ -1774,6 +1799,40 @@ RENDER.onboard = async () => {
     <div class="card-body" id="agentBody"></div>
   </div>
 
+  ${sessions.length ? `
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">Recent adjudications</div>
+      <div class="card-sub">Every session already put to the agents · click a row for what each one said</div></div></div>
+    <div class="card-body">
+      <table><thead><tr>
+        <th>Session</th><th>Platform</th><th>Channel</th><th>Where</th>
+        <th>Outcome</th><th>Recommendation</th><th>A person</th><th>Started</th>
+      </tr></thead><tbody>
+        ${sessions.map((sn) => {
+          const run = runByKey.get(sn.id);
+          return `<tr class="clickable" data-session="${esc(sn.id)}">
+            <td class="mono">${esc(sn.id)}</td>
+            <td>${esc(name(sn.platform_id))}</td>
+            <td>${esc(titleCase(sn.channel))}</td>
+            <td class="muted">${esc(sn.device_label ?? '—')}</td>
+            <td><span class="badge b-${sn.status === 'approved' ? 'passed'
+                      : sn.status === 'declined' ? 'failed'
+                      : sn.status === 'review' ? 'review' : 'pending'}"
+              >${esc(titleCase(sn.status))}</span></td>
+            <td>${run ? `<b>${esc(titleCase(run.recommendation))}</b>
+                  <span class="mono muted">${esc(run.confidence)}%</span>
+                  ${run.vetoed_by ? `<span class="veto-tag">veto</span>` : ''}`
+                 : '<span class="muted">Not yet run</span>'}</td>
+            <td>${run?.human_outcome ? badge(run.human_outcome === 'accepted' ? 'passed'
+                      : run.human_outcome === 'overridden' ? 'review' : 'pending')
+                 : '<span class="muted">—</span>'}</td>
+            <td class="muted">${esc(fmtDateTime(sn.started_at))}</td>
+          </tr>`;
+        }).join('')}
+      </tbody></table>
+    </div>
+  </div>` : ''}
+
   <input type="hidden" id="wizPlatforms" value="${esc(JSON.stringify(platforms.map((p) => ({ id: p.id, name: p.name }))))}">`;
 };
 
@@ -1783,7 +1842,84 @@ WIRE.onboard = () => {
   WIZ.match = null;
   WIZ.run = null;
   renderWizStep();
+
+  document.querySelectorAll('tr[data-session]').forEach((r) =>
+    r.addEventListener('click', () => openAdjudication(r.dataset.session)));
 };
+
+// What the agents said about a session that has already been decided.
+// Reads the stored run rather than re-adjudicating: a decision has to
+// be reviewable as it was made, not as the rules would make it today.
+async function openAdjudication(sessionId) {
+  openModal('Adjudication', loading(), '', true);
+  try {
+    const [runs, captures] = await Promise.all([
+      DB.fetchAgentRuns({ sessionId }),
+      DB.fetchCaptures(sessionId).catch(() => []),
+    ]);
+    const run = runs[0];
+    if (!run) {
+      document.getElementById('modalBody').innerHTML =
+        '<div class="note note-info">This session was never put to the agents.</div>';
+      return;
+    }
+
+    const [decisions, agents] = await Promise.all([
+      DB.fetchAgentDecisions(run.id),
+      DB.fetchAgents().catch(() => []),
+    ]);
+    const remit = new Map(agents.map((a) => [a.id, a]));
+    const kind = run.recommendation === 'approve' ? 'note-info'
+      : run.recommendation === 'decline' ? 'note-danger' : 'note-warn';
+
+    document.getElementById('modalBody').innerHTML = `
+      <div class="note ${kind}">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <b style="font-size:14px">${esc(titleCase(run.recommendation))}</b>
+          <span class="badge b-${run.recommendation === 'approve' ? 'passed'
+            : run.recommendation === 'decline' ? 'failed' : 'review'}">${esc(run.confidence)}% confidence</span>
+          ${run.vetoed_by ? `<span class="veto-tag">vetoed by ${esc(run.vetoed_by.replace(/_/g, ' '))}</span>` : ''}
+        </div>
+        <div style="margin-top:7px">${esc(run.summary ?? '')}</div>
+      </div>
+
+      <dl class="kv" style="margin-top:12px">
+        <dt>Session</dt><dd class="mono">${esc(sessionId)}</dd>
+        <dt>Decided</dt><dd>${esc(fmtDateTime(run.created_at))}</dd>
+        <dt>Deliberation</dt><dd>${run.latency_ms ? `${esc(run.latency_ms)} ms` : '—'}</dd>
+        <dt>A person</dt><dd>${run.human_outcome ? esc(titleCase(run.human_outcome)) : '—'}</dd>
+        ${run.override_reason ? `<dt>Because</dt><dd>${esc(run.override_reason)}</dd>` : ''}
+        <dt>Captures</dt><dd>${captures.length
+          ? captures.map((c) => esc(titleCase(c.capture_type))).join(', ')
+          : '—'}</dd>
+      </dl>
+
+      ${captures.length ? `<div class="note note-info" style="margin-top:10px">
+        <b>No image is held.</b> Each capture was templated and the sample discarded — what remains
+        is the quality it was measured at and the template it produced.</div>` : ''}
+
+      <div style="margin-top:14px">
+        ${decisions.map((d) => `
+          <div class="agent">
+            <div class="agent-icon agent-${esc(d.verdict)}">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor">${VERDICT_ICON[d.verdict] ?? ''}</svg>
+            </div>
+            <div style="min-width:0;flex:1">
+              <div class="agent-name">${esc(remit.get(d.agent_id)?.name ?? titleCase(d.agent_id))}
+                ${badge(d.verdict === 'pass' ? 'passed' : d.verdict === 'fail' ? 'failed'
+                  : d.verdict === 'concern' ? 'review' : 'skipped')}
+                ${remit.get(d.agent_id)?.can_veto ? '<span class="veto-tag">can veto</span>' : ''}
+                <span class="mono muted" style="margin-left:auto;font-size:10.5px">${esc(d.confidence)}%</span>
+              </div>
+              <div class="agent-remit">${esc(remit.get(d.agent_id)?.remit ?? '')}</div>
+              <div class="agent-rationale">${esc(d.rationale)}</div>
+            </div>
+          </div>`).join('')}
+      </div>`;
+  } catch (e) {
+    document.getElementById('modalBody').innerHTML = errorState(e);
+  }
+}
 
 function renderWizStep() {
   const body = document.getElementById('wizBody');
