@@ -74,6 +74,7 @@ supabase/functions/
 supabase/
   seed.sql                     platforms, consent wording, watchlist, cases
   seed_lifecycle.sql           customers, assets, agreements, payments, fraud
+  seed_demo.sql                the demonstration cohort, at demo volume
   tests/harness.sql            stands in for a Supabase project on stock Postgres
   tests/logic_tests.sql        63 assertions
   tests/lifecycle_tests.sql    60 assertions
@@ -110,6 +111,10 @@ says what is missing.
 supabase db push
 psql "$DATABASE_URL" -f supabase/seed.sql
 psql "$DATABASE_URL" -f supabase/seed_lifecycle.sql
+psql "$DATABASE_URL" -f supabase/seed_demo.sql
+
+# or, all three in order with a summary at the end:
+DATABASE_URL=... ./scripts/seed-demo.sh
 ```
 
 **`ID_HASH_PEPPER` is required.** Identity hashing refuses to run without it,

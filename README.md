@@ -259,6 +259,7 @@ supabase/
   tests/          harness.sql + logic_tests.sql
   seed.sql        sandbox data, including the sibling platforms
   seed_lifecycle.sql  customers, assets, agreements, payments, fraud fixtures
+  seed_demo.sql   the demonstration cohort — 24 people, 32 cases, 20 agreements
 src/              supabaseClient.js, backend.js (window.XC_DB), console.js
                   capture.js — camera, image quality, liveness, WebAuthn
 tests/            browser tests for the capture maths and the wizard
@@ -291,6 +292,32 @@ Apply the schema:
 supabase db push
 psql "$DATABASE_URL" -f supabase/seed.sql
 ```
+
+### Loading the demonstration data
+
+`seed.sql` alone is enough to prove the schema works, not enough to show
+anyone. For a populated console — every page with something on it — load all
+three seeds in order:
+
+```bash
+DATABASE_URL="postgresql://postgres:…@db.<project>.supabase.co:5432/postgres" \
+  ./scripts/seed-demo.sh
+```
+
+That gives 24 subjects across 32 cases at every status, 21 customers, 20
+agreements with 260 payments and a live arrears book, 12 capture sessions with
+their agent adjudications, five fraud alerts from critical down to medium, 220
+API calls, 302 audit entries and seven data subject requests.
+
+Everyone in it is invented. The arithmetic is not: every case score,
+instalment, arrears position, behaviour rating, fraud score and credit limit on
+those rows is what `case_score()`, `instalment_cents()`, `allocate_payment()`,
+`recompute_contract_position()`, `payment_behaviour()`, `run_fraud_screen()` and
+`assess_credit_capacity()` actually computed from the evidence. Change a row and
+the numbers move, which is the only reason a demo of this is worth giving.
+
+The seeds insert rather than upsert, so run them once against an empty schema
+and use `supabase db reset` to start over.
 
 Function secrets:
 

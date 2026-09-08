@@ -197,6 +197,78 @@ begin
     (public.payment_behaviour(gen_random_uuid())->>'has_history')::boolean, false);
 end $$;
 
+-- ── A late payer is not a defaulter ────────────────────────────
+-- Three files with identical instalment counts and opposite conduct.
+-- The score has to separate them, because assess_credit_capacity()
+-- reads it as a single number.
+do $$
+declare
+  s_on uuid; s_late uuid; s_never uuid;
+  c_on uuid; c_late uuid; c_never uuid;
+  i int; due bigint; pay uuid; sched record;
+  b_on jsonb; b_late jsonb; b_never jsonb;
+begin
+  for i in 1..3 loop
+    insert into public.subjects (id_type, id_hash, id_last4, first_names, surname)
+    values ('sa_id', 'behaviour-subject-' || i, '00' || i,
+            (array['Ontime','Latey','Never'])[i], 'Payer')
+    returning id into s_on;
+
+    insert into public.customers (subject_id, platform_id, customer_number, status)
+    values (s_on, 'test_dealer', 'CUST-BEH-' || i, 'active')
+    returning id into c_on;
+
+    insert into public.contracts (id, customer_id, platform_id, agreement_type, status,
+      principal_cents, interest_rate_pct, term_months, instalment_cents,
+      first_payment_date, payment_day, collection_method)
+    values ('CT-BEH-' || i, c_on, 'test_dealer', 'unsecured_credit', 'active',
+      1200000, 0, 24, public.instalment_cents(1200000, 0, 24, 0),
+      (current_date - interval '11 months')::date, 1, 'debit_order');
+
+    perform public.generate_payment_schedule('CT-BEH-' || i);
+
+    -- The third file pays nothing at all.
+    continue when i = 3;
+
+    for sched in
+      select * from public.payment_schedule
+      where contract_id = 'CT-BEH-' || i and due_date <= current_date
+      order by instalment_no
+    loop
+      insert into public.payments (contract_id, customer_id, amount_cents, paid_at, method, status)
+      values ('CT-BEH-' || i, c_on, sched.amount_due_cents,
+              -- The second file pays every instalment a fortnight late.
+              (sched.due_date + case when i = 2 then 14 else 0 end)::timestamptz,
+              'debit_order', 'received')
+      returning id into pay;
+      perform public.allocate_payment(pay);
+    end loop;
+
+    perform public.recompute_contract_position('CT-BEH-' || i);
+  end loop;
+
+  select id into c_on    from public.customers where customer_number = 'CUST-BEH-1';
+  select id into c_late  from public.customers where customer_number = 'CUST-BEH-2';
+  select id into c_never from public.customers where customer_number = 'CUST-BEH-3';
+
+  b_on    := public.payment_behaviour(c_on);
+  b_late  := public.payment_behaviour(c_late);
+  b_never := public.payment_behaviour(c_never);
+
+  perform public.expect('paying every instalment on time scores 100',
+    (b_on->>'score')::int, 100);
+  perform public.expect('paying every instalment late is counted as late',
+    (b_late->>'paid_late')::int = (b_late->>'instalments_due')::int, true);
+  perform public.expect('  · and missed nothing',
+    (b_late->>'missed_or_short')::int, 0);
+  perform public.expect('  · so it scores above a defaulter',
+    (b_late->>'score')::int > (b_never->>'score')::int, true);
+  perform public.expect('  · and below a payer who was never late',
+    (b_late->>'score')::int < (b_on->>'score')::int, true);
+  perform public.expect('paying nothing scores zero',
+    (b_never->>'score')::int, 0);
+end $$;
+
 -- ── Phone normalisation ────────────────────────────────────────
 do $$
 begin
@@ -300,6 +372,100 @@ begin
   perform public.expect('re-screening does not duplicate signals',
     (select count(*) from public.fraud_signals
      where case_id = case1 and rule_code = 'doc_reused_across_identities'), 1::bigint);
+end $$;
+
+-- ── The three rules that used to be registered and never read ──
+-- address_not_in_subject_name, dob_inconsistent and
+-- id_mismatch_document_vs_claim each sat in fraud_rules with a weight
+-- and a description while run_fraud_screen ignored them. These
+-- assertions exist so that cannot happen again quietly.
+do $$
+declare
+  s3 uuid; c3 uuid; case3 text := 'VC-FRAUD-0002';
+  addr uuid; res jsonb;
+begin
+  insert into public.subjects (id_type, id_hash, id_last4, first_names, surname, date_of_birth)
+  values ('sa_id', 'lifecycle-subject-vetting', '7081', 'Nomvula', 'Sithole', '1990-05-14')
+  returning id into s3;
+
+  insert into public.customers (subject_id, platform_id, customer_number, status)
+  values (s3, 'test_dealer', 'CUST-0004', 'active') returning id into c3;
+
+  insert into public.verification_cases (id, subject_id, platform_id, level, status)
+  values (case3, s3, 'test_dealer', 'standard', 'in_progress');
+
+  -- A proof of residence in somebody else's name.
+  insert into public.addresses (customer_id, subject_id, line1, suburb, city,
+                                province, postal_code, address_hash)
+  values (c3, s3, '14 Sivewright Avenue', 'Doornfontein', 'Johannesburg',
+          'Gauteng', '2094', 'pending')
+  returning id into addr;
+
+  insert into public.address_verifications (address_id, case_id, method,
+    document_in_subject_name, status, confidence, provider)
+  values (addr, case3, 'utility_bill', false, 'manual_review', 30, 'simulation');
+
+  -- The name the authority returned is not the name claimed, and the
+  -- date of birth carried in the identity number is not the one on the
+  -- application.
+  insert into public.identity_verifications (case_id, subject_id, id_type, id_last4,
+    structure_valid, derived_date_of_birth, claimed_name, authority_name,
+    name_match_score, authority_status)
+  values (case3, s3, 'sa_id', '7081', true, '1987-03-02',
+          'Nomvula Sithole', 'N Sithole-Radebe', 48, 'match');
+
+  res := public.run_fraud_screen(case3, c3);
+
+  perform public.expect('proof of residence in another name is flagged',
+    exists (select 1 from public.fraud_signals
+            where case_id = case3 and rule_code = 'address_not_in_subject_name'), true);
+  perform public.expect('  · as a warning, not an accusation',
+    (select severity from public.fraud_signals
+     where case_id = case3 and rule_code = 'address_not_in_subject_name'), 'warn');
+
+  perform public.expect('a name the authority does not confirm is flagged',
+    exists (select 1 from public.fraud_signals
+            where case_id = case3 and rule_code = 'id_mismatch_document_vs_claim'), true);
+
+  perform public.expect('a date of birth the identity number contradicts is flagged',
+    exists (select 1 from public.fraud_signals
+            where case_id = case3 and rule_code = 'dob_inconsistent'), true);
+
+  perform public.expect('  · and the two identity rules are critical',
+    (select count(*) from public.fraud_signals
+     where case_id = case3 and severity = 'critical'
+       and rule_code in ('id_mismatch_document_vs_claim','dob_inconsistent')), 2::bigint);
+
+  -- The converse: a file where all three agree raises none of them.
+  update public.address_verifications set document_in_subject_name = true where address_id = addr;
+  update public.identity_verifications
+     set name_match_score = 100, derived_date_of_birth = '1990-05-14' where case_id = case3;
+
+  res := public.run_fraud_screen(case3, c3);
+
+  perform public.expect('a consistent file raises none of the three',
+    (select count(*) from public.fraud_signals
+     where case_id = case3
+       and rule_code in ('address_not_in_subject_name',
+                         'id_mismatch_document_vs_claim','dob_inconsistent')), 0::bigint);
+end $$;
+
+-- Every rule that is registered must be reachable by the screen. A
+-- weight and a description are a promise of coverage.
+do $$
+declare v_dead text[];
+begin
+  select array_agg(r.code order by r.code) into v_dead
+  from public.fraud_rules r
+  where r.active
+    and not exists (
+      select 1 from pg_proc p
+      where p.proname = 'run_fraud_screen'
+        and p.prosrc like '%' || r.code || '%'
+    );
+
+  perform public.expect('every active fraud rule is evaluated by the screen',
+    coalesce(v_dead, '{}'::text[]), '{}'::text[]);
 end $$;
 
 -- ── Credit capacity ────────────────────────────────────────────
