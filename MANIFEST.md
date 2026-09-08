@@ -74,7 +74,7 @@ supabase/functions/
 supabase/
   seed.sql                     platforms, consent wording, watchlist, cases
   seed_lifecycle.sql           customers, assets, agreements, payments, fraud
-  seed_demo.sql                the demonstration cohort, at demo volume
+  seed_demo.sql                the same shape of data, for a real database
   tests/harness.sql            stands in for a Supabase project on stock Postgres
   tests/logic_tests.sql        63 assertions
   tests/lifecycle_tests.sql    73 assertions
@@ -84,11 +84,14 @@ tests/
   capture-metrics.html         image-quality maths vs synthetic images
   run-capture-metrics.mjs      runs the above in headless Chromium
   run-onboarding-wizard.mjs    the whole wizard, on Chromium's synthetic camera
-  postgrest-shim.mjs           a small stand-in for Supabase's REST layer,
-                               501 on anything it does not truly implement
+  postgrest-shim.mjs           a small stand-in for Supabase's REST layer, for
+                               the day the project exists. Not on the default
+                               path; 501 on anything it does not truly implement
+  run-dataset.mjs              the dataset: volume, referential integrity, and
+                               that the figures were computed not written down
   run-console-pages.mjs        every console page, plus a case, a customer
                                profile and a stored adjudication, rendered by
-                               the shipped bundle from real seeded rows
+                               the shipped bundle. No database.
 
 scripts/test-db.sh             applies the schema and runs all three SQL suites
 scripts/seed-demo.sh           loads all three seeds in order, with a summary
@@ -102,7 +105,10 @@ npm install
 npm run dev
 ```
 
-Point it at a Supabase project (`.env.example` lists every variable):
+That runs it. The console builds its own dataset in the browser — roughly
+127 000 records across every module, deterministic, no database and no keys.
+
+For a real project (`.env.example` lists every variable):
 
 ```bash
 VITE_SUPABASE_URL_SANDBOX=https://<project>.supabase.co
@@ -110,8 +116,7 @@ VITE_SUPABASE_KEY_SANDBOX=sb_publishable_…
 ```
 
 Both are publishable and public by design — access control is row level security
-and the edge functions, not secrecy. Without them the console still loads and
-says what is missing.
+and the edge functions, not secrecy. The header says which source is answering.
 
 ```bash
 supabase db push

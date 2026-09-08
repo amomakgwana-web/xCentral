@@ -284,6 +284,157 @@ function wireCaseRows() {
     r.addEventListener('click', () => openCase(r.dataset.case)));
 }
 
+// ── Case evidence ───────────────────────────────────────────────
+// fetchCase() returns the identity, document, credit, affordability,
+// biometric and watchlist records behind a case, and for a long time
+// openCase() rendered only the check timeline and dropped the rest —
+// six of its seven round-trips fetched data nobody could see. The
+// check timeline says a document check scored 91; these say which
+// document, whether its machine-readable zone verified, and what the
+// tamper signals were. That is the difference between a score and
+// evidence a person can act on.
+//
+// Each section renders only when there is something in it, so a basic
+// age check does not grow six empty panels.
+function caseEvidence(c) {
+  const section = (title, body) => body
+    ? `<div style="height:16px"></div>
+       <div class="card-title" style="margin-bottom:10px">${esc(title)}</div>${body}`
+    : '';
+
+  const identity = (c.identity ?? []).map((v) => `
+    <dl class="kv">
+      <dt>Authority</dt><dd>${chip(
+        v.authority_status === 'match' ? 'passed'
+        : v.authority_status === 'no_match' ? 'failed' : 'review', v.authority_status)}
+        ${v.authority_provider ? `<span class="muted">via ${esc(v.authority_provider)}</span>` : ''}</dd>
+      <dt>Name returned</dt><dd>${esc(v.authority_name ?? '—')}
+        ${v.name_match_score !== null ? `<span class="mono muted">${esc(v.name_match_score)}% match</span>` : ''}</dd>
+      <dt>Claimed</dt><dd>${esc(v.claimed_name ?? '—')}</dd>
+      <dt>From the number</dt><dd>${fmtDate(v.derived_date_of_birth)} ·
+        ${esc(titleCase(v.derived_gender ?? 'unknown'))} ·
+        ${esc(titleCase(v.derived_citizenship ?? 'unknown'))}</dd>
+      <dt>Flags</dt><dd>${[
+        v.structure_valid ? '' : '<span class="badge b-failed">Check digit failed</span>',
+        v.deceased_flag ? '<span class="badge b-failed">On the deceased register</span>' : '',
+        v.watchlist_hit ? '<span class="badge b-review">Watchlist hit</span>' : '',
+      ].filter(Boolean).join(' ') || '<span class="muted">None</span>'}</dd>
+    </dl>`).join('<div style="height:10px"></div>');
+
+  const documents = (c.documents ?? []).length ? `
+    <table><thead><tr>
+      <th>Document</th><th>MRZ</th><th>Expires</th><th>Authenticity</th><th>Outcome</th>
+    </tr></thead><tbody>
+      ${c.documents.map((d) => {
+        const tamper = Array.isArray(d.tamper_signals) ? d.tamper_signals : [];
+        return `<tr>
+          <td><b>${esc(titleCase(d.doc_type))}</b>
+            ${d.document_number_last4 ? `<div class="mono muted">···· ${esc(d.document_number_last4)}</div>` : ''}</td>
+          <td>${d.mrz_present
+            ? (d.mrz_valid ? '<span class="badge b-passed">Verified</span>'
+                           : '<span class="badge b-failed">Check digit failed</span>')
+            : '<span class="muted">None</span>'}</td>
+          <td>${d.date_of_expiry ? fmtDate(d.date_of_expiry) : '<span class="muted">—</span>'}
+            ${d.expired ? '<span class="badge b-failed">Expired</span>' : ''}
+            ${d.stale ? '<span class="badge b-review">Stale</span>' : ''}</td>
+          <td class="mono">${d.authenticity_score ?? '—'}</td>
+          <td>${badge(d.status)}
+            ${tamper.length ? `<div class="muted" style="font-size:10.5px;color:var(--red)">
+              ${esc(tamper.map((t) => t.code ?? '').filter(Boolean).join(', '))}</div>` : ''}
+            ${d.reason_codes?.length ? `<div class="muted" style="font-size:10.5px">
+              ${esc(d.reason_codes.join(', '))}</div>` : ''}</td>
+        </tr>`;
+      }).join('')}
+    </tbody></table>` : '';
+
+  const credit = (c.credit ?? []).map((k) => `
+    <dl class="kv">
+      <dt>Bureau</dt><dd>${esc(k.bureau_id)} · ${esc(titleCase(k.enquiry_type ?? ''))} enquiry
+        ${k.provider_reference ? `<span class="mono muted">${esc(k.provider_reference)}</span>` : ''}</dd>
+      <dt>Score</dt><dd style="max-width:220px">${meter(k.score)}</dd>
+      <dt>Band</dt><dd>${esc(k.band ?? '—')} ${k.risk ? chip(
+        k.risk === 'low' ? 'passed' : k.risk === 'medium' ? 'review' : 'failed', k.risk) : ''}</dd>
+      <dt>Accounts</dt><dd>${esc(k.accounts_total ?? 0)} open ·
+        ${esc(k.accounts_in_arrears ?? 0)} in arrears${k.worst_arrears_months
+          ? ` · worst ${esc(k.worst_arrears_months)} month(s)` : ''}</dd>
+      <dt>Monthly obligations</dt><dd class="mono">${fmtRand(k.monthly_debt_obligations_cents)}</dd>
+      <dt>Adverse</dt><dd>${[
+        (k.defaults ?? 0) ? `${k.defaults} default(s)` : '',
+        (k.judgments ?? 0) ? `${k.judgments} judgment(s)` : '',
+        k.debt_review ? 'Under debt review' : '',
+        k.sequestration ? 'Sequestrated' : '',
+      ].filter(Boolean).join(' · ') || '<span class="muted">Nothing on record</span>'}</dd>
+    </dl>`).join('<div style="height:10px"></div>');
+
+  // The affordability panel is laid out to mirror NCA Regulation 23A:
+  // the applied expense figure is the greater of what was declared and
+  // the regulated minimum, and showing both is the only way a reader
+  // can see which one governed.
+  const affordability = (c.affordability ?? []).map((a) => `
+    <dl class="kv">
+      <dt>Net income</dt><dd class="mono">${fmtRand(a.net_income_cents)}
+        ${a.income_verified ? '<span class="badge b-passed">Verified</span>'
+                            : '<span class="badge b-review">Not verified</span>'}
+        ${a.income_source ? `<span class="muted">${esc(a.income_source)}</span>` : ''}</dd>
+      <dt>Declared expenses</dt><dd class="mono">${fmtRand(a.declared_expenses_cents)}</dd>
+      <dt>Regulation 23A minimum</dt><dd class="mono">${fmtRand(a.minimum_expenses_cents)}</dd>
+      <dt>Applied</dt><dd class="mono"><b>${fmtRand(a.applied_expenses_cents)}</b>
+        <span class="muted">the greater of the two</span></dd>
+      <dt>Existing obligations</dt><dd class="mono">${fmtRand(a.existing_obligations_cents)}</dd>
+      <dt>Proposed instalment</dt><dd class="mono">${fmtRand(a.proposed_instalment_cents)}</dd>
+      <dt>Discretionary income</dt><dd class="mono"><b>${fmtRand(a.discretionary_income_cents)}</b></dd>
+      <dt>Outcome</dt><dd>${chip(
+        a.outcome === 'affordable' ? 'passed'
+        : a.outcome === 'marginal' ? 'review' : 'failed', a.outcome)}
+        ${a.reason_codes?.length ? `<span class="muted">${esc(a.reason_codes.join(', '))}</span>` : ''}</dd>
+    </dl>`).join('<div style="height:10px"></div>');
+
+  const biometrics = (c.biometrics ?? []).length ? `
+    <table><thead><tr>
+      <th>Modality</th><th>Mode</th><th>Similarity</th><th>Threshold</th>
+      <th>Liveness</th><th>Outcome</th>
+    </tr></thead><tbody>
+      ${c.biometrics.map((b) => `<tr>
+        <td><b>${esc(titleCase(b.modality))}</b>
+          <div class="mono muted">${esc(b.model_id ?? '')}</div></td>
+        <td>${esc(titleCase(b.mode ?? ''))}</td>
+        <td class="mono">${b.similarity ?? '—'}</td>
+        <td class="mono">${b.threshold_applied ?? '—'}
+          ${b.operating_fmr ? `<div class="muted">FMR ${esc(b.operating_fmr)}</div>` : ''}</td>
+        <td>${b.liveness_performed
+          ? (b.liveness_passed ? `<span class="badge b-passed">Live</span>
+              ${b.pad_level ? `<span class="muted">PAD ${esc(b.pad_level)}</span>` : ''}`
+            : `<span class="badge b-failed">${esc(titleCase(b.attack_type ?? 'failed'))}</span>`)
+          : '<span class="muted">Not run</span>'}</td>
+        <td>${badge(b.status)}
+          ${b.reason_codes?.length ? `<div class="muted" style="font-size:10.5px">
+            ${esc(b.reason_codes.join(', '))}</div>` : ''}</td>
+      </tr>`).join('')}
+    </tbody></table>
+    <div class="note note-info" style="margin-top:10px">
+      <b>No image is held.</b> A similarity is a comparison of two irreversible templates.
+      The threshold is the model's own calibration at the stated false match rate, not a
+      number chosen here.</div>` : '';
+
+  const hits = (c.hits ?? []).length ? `
+    <table><thead><tr><th>Match</th><th>Score</th><th>Status</th><th>Note</th></tr></thead><tbody>
+      ${c.hits.map((h) => `<tr>
+        <td class="mono">${esc(h.entry_id ?? '—')}</td>
+        <td class="mono">${esc(h.match_score)}</td>
+        <td>${chip(h.status === 'confirmed' ? 'failed'
+          : h.status === 'false_positive' ? 'passed' : 'review', h.status)}</td>
+        <td class="muted">${esc(h.review_note ?? '—')}</td>
+      </tr>`).join('')}
+    </tbody></table>` : '';
+
+  return section('Identity', identity)
+    + section('Documents', documents)
+    + section('Credit bureau', credit)
+    + section('Affordability · NCA Regulation 23A', affordability)
+    + section('Biometrics', biometrics)
+    + section('Watchlist hits', hits);
+}
+
 async function openCase(caseId) {
   openModal(caseId, loading());
   try {
@@ -340,7 +491,8 @@ async function openCase(caseId) {
       ${gaps}
       <div style="height:16px"></div>
       <div class="card-title" style="margin-bottom:10px">Check timeline</div>
-      ${timeline}`,
+      ${timeline}
+      ${caseEvidence(c)}`,
       decidable ? `
         <button class="btn" onclick="closeModal()">Close</button>
         <button class="btn btn-danger btn-sm" id="rejectBtn">Reject</button>
@@ -1630,7 +1782,11 @@ async function boot() {
   DB = window.XC_DB;
 
   const badgeEl = document.getElementById('envBadge');
-  badgeEl.textContent = DB.env === 'production' ? 'Production' : 'Sandbox';
+  // Which source is behind the console, stated rather than assumed.
+  // 'Local data' means the records ship with the bundle; the other two
+  // mean a Supabase project is answering.
+  const ENV_LABEL = { production: 'Production', sandbox: 'Sandbox', local: 'Local data' };
+  badgeEl.textContent = ENV_LABEL[DB.env] ?? 'Local data';
   badgeEl.className = `env-badge env-${DB.env}`;
 
   // Connection state is no longer surfaced in the header. It still

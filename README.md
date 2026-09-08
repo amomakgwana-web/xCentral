@@ -259,9 +259,11 @@ supabase/
   tests/          harness.sql + logic_tests.sql
   seed.sql        sandbox data, including the sibling platforms
   seed_lifecycle.sql  customers, assets, agreements, payments, fraud fixtures
-  seed_demo.sql   the demonstration cohort — 24 people, 32 cases, 20 agreements
+  seed_demo.sql   the same shape of data, for a real database
 src/              supabaseClient.js, backend.js (window.XC_DB), console.js
                   capture.js — camera, image quality, liveness, WebAuthn
+                  localClient.js — the in-memory client, shaped like the real one
+  data/           the generated dataset and the arithmetic behind it
 tests/            browser tests for the capture maths, the wizard, and
                   every console page against a real seeded database
 index.html        the console
@@ -276,7 +278,12 @@ npm install
 npm run dev
 ```
 
-Point it at a Supabase project:
+That is the whole of it. The console runs on a dataset generated in the
+browser: about 127 000 records across every module, built in under a second,
+identical on every machine. No database, no keys, no network.
+
+When the Supabase project is stood up, point the console at it and the same
+build reads from Postgres instead:
 
 ```bash
 VITE_SUPABASE_URL_SANDBOX=https://<project>.supabase.co
@@ -284,8 +291,8 @@ VITE_SUPABASE_KEY_SANDBOX=sb_publishable_…
 ```
 
 Both are publishable values and public by design — access control is row level
-security and the edge functions, not secrecy. Without them the console still
-loads and says what is missing rather than rendering blank.
+security and the edge functions, not secrecy. The header says which source is
+answering, so there is never a question about what is on screen.
 
 Apply the schema:
 
@@ -294,31 +301,18 @@ supabase db push
 psql "$DATABASE_URL" -f supabase/seed.sql
 ```
 
-### Loading the demonstration data
+### Seeding the project, when there is one
 
-`seed.sql` alone is enough to prove the schema works, not enough to show
-anyone. For a populated console — every page with something on it — load all
-three seeds in order:
+The seeds under `supabase/` populate a real database with the same shape of
+data the console generates locally. They are not needed to run anything today:
 
 ```bash
 DATABASE_URL="postgresql://postgres:…@db.<project>.supabase.co:5432/postgres" \
   ./scripts/seed-demo.sh
 ```
 
-That gives 24 subjects across 32 cases at every status, 21 customers, 20
-agreements with 260 payments and a live arrears book, 12 capture sessions with
-their agent adjudications, five fraud alerts from critical down to medium, 220
-API calls, 302 audit entries and seven data subject requests.
-
-Everyone in it is invented. The arithmetic is not: every case score,
-instalment, arrears position, behaviour rating, fraud score and credit limit on
-those rows is what `case_score()`, `instalment_cents()`, `allocate_payment()`,
-`recompute_contract_position()`, `payment_behaviour()`, `run_fraud_screen()` and
-`assess_credit_capacity()` actually computed from the evidence. Change a row and
-the numbers move, which is the only reason a demo of this is worth giving.
-
-The seeds insert rather than upsert, so run them once against an empty schema
-and use `supabase db reset` to start over.
+They insert rather than upsert, so run them once against an empty schema and
+use `supabase db reset` to start over.
 
 Function secrets:
 
@@ -329,6 +323,48 @@ Function secrets:
 | `RETENTION_PURGE_SECRET` | Authenticates the scheduled purge |
 | `XCENTRAL_PROVIDER_<DOMAIN>` | Provider per domain; defaults to `simulation` |
 | `XCENTRAL_ALLOW_SIMULATION_IN_PROD` | Only to deliberately drill against production |
+
+---
+
+## The dataset
+
+`src/data/` builds every table the console reads, in dependency order, when the
+page loads. At least two hundred records in every module that holds records:
+
+| | |
+|---|---|
+| People | 900 subjects, 220 staff, 240 employers |
+| Cases | ~1 500 across every status, with ~9 000 checks behind them |
+| Documents | ~3 400, examined, with forensics on every identity document |
+| Credit | ~800 bureau enquiries and ~4 000 tradelines under them |
+| Biometrics | ~2 200 templates, ~1 300 comparisons, 220 duplicate-enrolment flags |
+| Agreements | ~800 contracts, ~45 000 scheduled instalments, ~12 000 payments |
+| Capture | 230 sessions with their agent adjudications |
+| Fraud | ~1 500 signals, ~280 alerts, 220 register entries |
+| Platform | 220 API keys, ~800 calls, ~10 000 audit entries, 215 data subject requests |
+
+Two properties matter more than the volume.
+
+**It is deterministic.** One fixed seed drives every choice, so the same figures
+appear on every reload and on every machine. A number that moves when you
+refresh is a number nobody can check.
+
+**It is computed, not written down.** Instalments come from the amortisation
+formula, schedules from the reducing balance, arrears from comparing the
+schedule to what was paid, behaviour from that record, case scores from the
+checks that ran, fraud signals from the rules the engine runs, and lending
+limits from the weakest of affordability, bureau, behaviour and exposure.
+Change a record and the figures that depend on it move, because they were never
+written down in the first place.
+
+Configuration — bureaus, modalities, agents, fraud rules, retention policies —
+is deliberately its natural size. There are four credit bureaus in South Africa;
+padding that list to two hundred would make the page lie about what the system
+can reach.
+
+Everyone in it is invented.
+
+---
 
 ## Tests
 
@@ -350,28 +386,26 @@ node tests/run-capture-metrics.mjs
 # The whole capture wizard, driven by Chromium's synthetic camera
 npm run build && node tests/run-onboarding-wizard.mjs
 
-# Every console page, rendered by the shipped bundle from real seeded
-# rows. Needs a database with the migrations and all three seeds, and a
-# bundle built pointing at the shim's port.
-VITE_SUPABASE_URL_SANDBOX=http://127.0.0.1:4187 \
-VITE_SUPABASE_KEY_SANDBOX=sb_publishable_shim_not_a_real_key \
-  npm run build
-DATABASE_URL=postgresql://…/xcdemo npm run test:console
+# The dataset: volume, referential integrity, and that the figures
+# were computed rather than written down
+npm run test:dataset
+
+# Every console page, rendered by the shipped bundle from the dataset
+# it ships with. No database.
+npm run test:console
 ```
 
 `harness.sql` recreates just enough of a Supabase project (`auth.users`,
 `storage.buckets`, the `anon`/`authenticated`/`service_role` roles) for the
 migrations to run against stock Postgres. It is not deployed.
 
-`tests/postgrest-shim.mjs` is the other half of that arrangement: a
+`tests/postgrest-shim.mjs` is kept for the day the project is stood up: a
 deliberately small stand-in for Supabase's REST layer, speaking exactly the
 subset of PostgREST `src/backend.js` uses and returning **501 for anything
-else** rather than guessing. That refusal is the point — a shim that quietly
-answered a query it did not really understand would make a passing test
-meaningless. It runs every query as the `authenticated` role, so a page that
-renders does so because row level security allows it.
+else** rather than guessing. It is not on the default path, because the console
+no longer needs a database to render.
 
-What that test catches which nothing else does: the SQL suites prove the
+What the console test catches which nothing else does: the SQL suites prove the
 functions compute the right numbers and CI proves no table backing a page is
 empty, but neither proves the console can *render* what is in those tables. A
 null where `console.js` expects a string produces an error panel, and every

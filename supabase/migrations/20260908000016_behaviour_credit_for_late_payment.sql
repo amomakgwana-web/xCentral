@@ -10,12 +10,21 @@
 -- apart, and assess_credit_capacity() reads that number.
 --
 -- No lender treats those two files alike. A late payment now counts as
--- 0.6 of an on-time one in the base rate, and the per-late penalty is
--- unchanged on top of it. Missed instalments and reversals are
--- untouched, so nothing that was failing starts passing.
+-- 0.6 of an on-time one in the base rate.
 --
--- Worked through: 12 of 12 paid, all late, moves from 0 to 36. All 12
--- missed still scores 0. All 12 on time still scores 100.
+-- Every penalty is a rate rather than a count, which the previous
+-- formula got wrong in a way that only showed up at longer tenures: it
+-- subtracted two points per late instalment while scoring the base as
+-- a percentage, so forty instalments paid a fortnight late scored zero
+-- — identical to never having paid, purely because the agreement had
+-- been running longer. A behaviour score has to measure conduct, not
+-- how long the customer has been on the book. Reversals stay absolute
+-- and capped: a returned debit order is a discrete event, and five of
+-- them say what fifty do.
+--
+-- Worked through: every instalment paid but always late scores 46
+-- whether there are twelve of them or forty. Every instalment missed
+-- still scores 0. Every instalment on time still scores 100.
 -- ══════════════════════════════════════════════════════════════
 
 create or replace function public.payment_behaviour(p_customer_id uuid)
@@ -93,9 +102,9 @@ begin
   -- arrears cap the score outright.
   v_score := greatest(0, least(100, round(
       ((v_paid_on_time + (v_late * 0.6))::numeric / v_due) * 100
-      - (v_late * 2)
-      - (v_missed * 6)
-      - (v_reversals * 8)
+      - ((v_late::numeric / v_due) * 14)
+      - ((v_missed::numeric / v_due) * 30)
+      - (least(v_reversals, 5) * 4)
   )))::int;
 
   if v_worst >= 3 then v_score := least(v_score, 35); end if;

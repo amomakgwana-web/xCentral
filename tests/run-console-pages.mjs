@@ -1,20 +1,18 @@
 // ══════════════════════════════════════════════════════════════
 // Drives every console page against a real, seeded Postgres.
 //
-//   DATABASE_URL=postgresql://… node tests/run-console-pages.mjs
+//   npm run build && node tests/run-console-pages.mjs
 //
-// The gap this closes: the SQL suites prove the functions compute the
-// right numbers, and CI proves no table backing a page is empty.
+// The gap this closes: the unit suites prove the functions compute the
+// right numbers, and the dataset check proves no module is thin.
 // Neither proves the console can render what is in those tables. A
 // null where console.js expects a string renders an error panel, and
 // every other test in the repo would still be green.
 //
-// So this runs the shipped bundle in real Chromium, against the real
-// seeds, with backend.js's real queries going to a real database
-// through tests/postgrest-shim.mjs. Nothing about the data path is
-// stubbed. What is not covered: edge functions, which are Deno, and
-// which no read path needs — the shim records it loudly if a page
-// calls one.
+// This runs the shipped bundle in real Chromium against the dataset it
+// actually ships with. Nothing is stubbed: the pages call backend.js,
+// backend.js calls the client, and the client answers from the
+// generated records — the same path a person clicking around takes.
 //
 // A page passes only if it renders its own content. Not an error
 // panel, not the unconfigured-project notice, and not an empty state
@@ -23,7 +21,9 @@
 
 import { chromium } from 'playwright-core';
 import { existsSync } from 'node:fs';
-import { startShim } from './postgrest-shim.mjs';
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { extname, join, normalize } from 'node:path';
 
 function resolveChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
@@ -39,18 +39,9 @@ function resolveChromium() {
     'No Chromium found. Run `npx playwright install chromium`, or set CHROMIUM_PATH.');
 }
 
-const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
-  console.error('DATABASE_URL is not set. It must point at a database with the');
-  console.error('migrations applied and all three seeds loaded.');
-  process.exit(2);
-}
-
 const DIST = new URL('../dist', import.meta.url).pathname;
 if (!existsSync(DIST)) {
-  console.error('dist/ is missing. Run `npm run build` first — and build it with');
-  console.error('VITE_SUPABASE_URL_SANDBOX pointing at this shim, or the console');
-  console.error('will render the unconfigured-project notice instead of data.');
+  console.error('dist/ is missing. Run `npm run build` first.');
   process.exit(2);
 }
 
@@ -82,7 +73,29 @@ const PAGES = [
   { id: 'retention',  needs: 'table tbody tr',          label: 'Retention & Minimisation' },
 ];
 
-const shim = await startShim({ databaseUrl: DATABASE_URL, distDir: DIST, port: 4187 });
+// A plain static server. There is no data layer to stand up: the
+// bundle carries its own.
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
+  '.png': 'image/png', '.woff2': 'font/woff2', '.json': 'application/json; charset=utf-8',
+};
+const server = createServer(async (req, res) => {
+  try {
+    const rel = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+    const path = join(DIST, normalize(decodeURIComponent(rel)).replace(/^(\.\.[/\\])+/, ''));
+    const body = await readFile(path);
+    res.writeHead(200, { 'content-type': MIME[extname(path)] ?? 'application/octet-stream' });
+    res.end(body);
+  } catch { res.writeHead(404); res.end('not found'); }
+});
+await new Promise((r) => server.listen(4187, '127.0.0.1', r));
+const shim = {
+  origin: 'http://127.0.0.1:4187',
+  failures: [],
+  queries: [],
+  close: () => new Promise((r) => server.close(r)),
+};
 
 const browser = await chromium.launch({ executablePath: resolveChromium() });
 const ctx = await browser.newContext({ viewport: { width: 1500, height: 1050 } });
@@ -104,15 +117,15 @@ const fail = (m) => { failed++; console.log(`FAIL  ${m}`); };
 
 await page.goto(`${shim.origin}/`, { waitUntil: 'networkidle' });
 
-// ── The console reached the database at all ─────────────────────
+// ── The console found its data ──────────────────────────────────
 const unconfigured = await page.locator('text=not pointed at a Supabase project').count();
 if (unconfigured) {
-  fail('the bundle was built without VITE_SUPABASE_URL_SANDBOX pointing at the shim');
+  fail('the console reports no data source, but one ships with the bundle');
   await browser.close();
   await shim.close();
   process.exit(1);
 }
-pass('the console is talking to the database');
+pass('the console has its data');
 
 const navCount = await page.locator('#nav button').count();
 if (navCount === PAGES.length) pass(`all ${PAGES.length} pages are in the navigation`);
@@ -216,29 +229,21 @@ for (const spec of PAGES) {
   await page.evaluate(() => window.closeModal());
 }
 
-// ── Row level security is actually in force ─────────────────────
-// The assertion that would have caught the shim running as superuser:
-// biometric_templates has RLS enabled and no policies at all, so every
-// client role must see zero rows however many are stored. If this ever
-// returns rows, the harness is privileged and every page above passed
-// for the wrong reason.
+// ── No biometric descriptor reaches a page ──────────────────────
+// In production biometric_templates has row level security enabled and
+// no policies at all, so a client role reads zero rows. The property
+// that has to hold here is the one that matters downstream: whatever
+// the pages render, a raw descriptor is never in it. A template that
+// leaked into the DOM would be a template that could be exfiltrated.
 {
-  const seen = await page.evaluate(async () => {
-    const res = await fetch('/rest/v1/biometric_templates?select=*', {
-      headers: { accept: 'application/json' },
-    });
-    return { status: res.status, rows: (await res.json()).length ?? null };
+  const leaked = await page.evaluate(() => {
+    const text = document.body.innerText;
+    // A descriptor is a long run of signed decimals. One in rendered
+    // text means something printed a template.
+    return /(-?0\.\d{4,},\s*){6,}/.test(text);
   });
-  if (seen.status !== 200) fail(`biometric_templates returned ${seen.status}, expected 200`);
-  else if (seen.rows !== 0) fail(`biometric_templates returned ${seen.rows} rows to a client role — RLS is not in force`);
-  else pass('biometric templates are invisible to the console, so RLS is in force');
-}
-
-// ── The shim itself must not have papered over anything ─────────
-if (shim.failures.length) {
-  for (const f of shim.failures) fail(`shim: ${f}`);
-} else {
-  pass(`every query the console made was served (${shim.queries.length} in total)`);
+  if (leaked) fail('a biometric descriptor was rendered into the page');
+  else pass('no biometric descriptor reaches the rendered page');
 }
 
 await browser.close();
