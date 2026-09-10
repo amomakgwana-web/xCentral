@@ -282,6 +282,21 @@ That is the whole of it. The console runs on a dataset generated in the
 browser: about 127 000 records across every module, built in under a second,
 identical on every machine. No database, no keys, no network.
 
+### One file, for sending to someone
+
+```bash
+npm run build:single      # → xcentral-console.html
+```
+
+Everything travels inside that file — styles, script, icon and the whole
+dataset — as one classic script rather than a module graph, so it opens by
+double-clicking it. No server, no install, no network: a laptop with the wifi
+off renders every page, and the only thing that degrades is the typeface,
+which falls back to a system font.
+
+The served build is still the one to develop against; the flattened build
+loads the capture code up front instead of when the wizard is opened.
+
 When the Supabase project is stood up, point the console at it and the same
 build reads from Postgres instead:
 
@@ -393,6 +408,10 @@ npm run test:dataset
 # Every console page, rendered by the shipped bundle from the dataset
 # it ships with. No database.
 npm run test:console
+
+# The single file, opened over file:// with nothing serving it — and
+# asserted to fetch nothing over the network
+npm run test:single
 ```
 
 `harness.sql` recreates just enough of a Supabase project (`auth.users`,

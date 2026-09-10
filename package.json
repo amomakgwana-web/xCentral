@@ -13,7 +13,9 @@
     "test:db": "./scripts/test-db.sh",
     "test:capture": "node tests/run-capture-metrics.mjs",
     "test:wizard": "npm run build && node tests/run-onboarding-wizard.mjs",
-    "test:console": "npm run build && node tests/run-console-pages.mjs"
+    "test:console": "npm run build && node tests/run-console-pages.mjs",
+    "build:single": "vite build --config vite.config.singlefile.js && node scripts/build-single-file.mjs",
+    "test:single": "npm run build:single && node tests/run-single-file.mjs"
   },
   "devDependencies": {
     "pg": "^8.23.0",
