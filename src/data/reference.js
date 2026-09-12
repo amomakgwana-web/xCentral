@@ -58,6 +58,77 @@ export const document_types = [
   { id: 'selfie', name: 'Liveness Selfie', category: 'other', max_age_days: null, has_mrz: false, has_portrait: true, active: true },
 ];
 
+// What each document type is expected to carry, and therefore which
+// forensic checks apply to it. A green ID book has no machine-readable
+// zone, so failing it for not having one would be the system inventing
+// a defect; a smart card carries a second, smaller copy of the
+// portrait, and that pair is the single strongest substitution check
+// available without a laboratory.
+//
+// I am NOT CERTAIN these match every issued version of every document
+// — card designs change and I have no specimen to check against. They
+// are rows precisely so that correcting them is a data change.
+export const document_security_features = [
+  { doc_type: 'sa_id_card',      id1_geometry: true,  mrz: true,  ghost_portrait: true,  laser_engraved: true,  barcode: false, notes: 'Polycarbonate card, laser engraved, secondary ghost portrait, machine-readable zone on the reverse.' },
+  { doc_type: 'sa_id_book',      id1_geometry: false, mrz: false, ghost_portrait: false, laser_engraved: false, barcode: true,  notes: 'Green barcoded book. The portrait is affixed and laminated, which is why substitution is easier here and the boundary checks matter more.' },
+  { doc_type: 'passport',        id1_geometry: false, mrz: true,  ghost_portrait: true,  laser_engraved: false, barcode: false, notes: 'ICAO 9303 booklet. Two machine-readable lines of 44 characters on the data page.' },
+  { doc_type: 'drivers_licence', id1_geometry: true,  mrz: false, ghost_portrait: false, laser_engraved: false, barcode: true,  notes: 'ID-1 card with a PDF417 barcode. No machine-readable zone.' },
+  { doc_type: 'asylum_permit',   id1_geometry: false, mrz: false, ghost_portrait: false, laser_engraved: false, barcode: true,  notes: 'Paper permit. Few physical security features, so the identity checks carry more of the weight.' },
+];
+
+// How heavily each forensic finding counts against a document, and
+// whether it is decisive on its own. Weights are rows so tuning is an
+// update and a past decision stays explicable against the weights that
+// were in force when it was made.
+//
+// Nothing here is decisive except the machine-readable zone failing
+// its check digits, because that is arithmetic rather than inference:
+// the data on the document does not agree with itself.
+export const document_forensic_rules = [
+  { code: 'doc_geometry_wrong',              name: 'Card is not the standard shape',            weight: 12, severity: 'warn',     decisive: false },
+  { code: 'doc_photographed_from_screen',    name: 'Photographed from a screen',                weight: 12, severity: 'warn',     decisive: false },
+  { code: 'doc_mrz_band_missing',            name: 'No machine-readable band where one belongs', weight: 14, severity: 'warn',    decisive: false },
+  { code: 'doc_mrz_check_digit_failed',      name: 'Machine-readable zone fails its check digits', weight: 45, severity: 'critical', decisive: true },
+  { code: 'portrait_not_found',              name: 'No portrait on the document',               weight: 20, severity: 'warn',     decisive: false },
+  { code: 'portrait_noise_mismatch',         name: 'Portrait texture does not match the card',  weight: 22, severity: 'critical', decisive: false },
+  { code: 'portrait_focus_mismatch',         name: 'Portrait is in a different focal plane',    weight: 18, severity: 'warn',     decisive: false },
+  { code: 'portrait_colour_mismatch',        name: 'Portrait and card disagree on white',       weight: 16, severity: 'warn',     decisive: false },
+  { code: 'portrait_edge_step',              name: 'Portrait has a physical edge',              weight: 24, severity: 'critical', decisive: false },
+  { code: 'portrait_taped_or_glossy',        name: 'Tape or gloss over the portrait',           weight: 20, severity: 'critical', decisive: false },
+  { code: 'portrait_error_level_mismatch',   name: 'Portrait compresses unlike the card',       weight: 18, severity: 'warn',     decisive: false },
+  { code: 'ghost_portrait_mismatch',         name: 'Ghost portrait is a different face',        weight: 40, severity: 'critical', decisive: false },
+  { code: 'ghost_portrait_absent',           name: 'Ghost portrait missing',                    weight: 10, severity: 'warn',     decisive: false },
+];
+
+// The measurement the browser can make is appearance similarity, not a
+// biometric match, so it gets its own thresholds under its own name
+// rather than borrowing the face model's. These were calibrated
+// against the synthetic pairs in the test suite and against no real
+// faces at all, which is why the band between them is wide and lands
+// in review rather than in a decision.
+export const appearance_thresholds = {
+  model_id: 'xc-appearance-hog-thumb-v1',
+  // Two different faces are alike to begin with — they are both faces
+  // — so the useful range of this measure sits well above zero and is
+  // narrower than a percentage suggests. Measured against the
+  // synthetic pairs in tests/run-vision.mjs and the journeys in
+  // tests/run-onboarding-wizard.mjs: the same person photographed
+  // twice under different conditions lands around 0.84, and two
+  // different people around 0.51 to 0.54.
+  same_person: 0.72,
+  different_person: 0.62,
+  // The ghost portrait is its own operating point. It is a cross-scale
+  // comparison — a portrait against a printed copy of itself at a
+  // third of the size — so both descriptors are built from far less
+  // detail and even a genuine pair scores lower than a pair of
+  // full-size photographs would.
+  ghost_pair: 0.62,
+  note: 'Cosine of a gradient-orientation descriptor and a layout thumbnail over an '
+      + 'illumination-normalised crop. Above the upper figure the two images look alike; below '
+      + 'the lower they do not; between them the system refers rather than decides. Calibrated '
+      + 'against synthetic faces and against no real ones, which is why the band is wide.',
+};
+
 export const credit_bureaus = [
   { id: 'transunion_za', name: 'TransUnion South Africa', active: true },
   { id: 'experian_za', name: 'Experian South Africa', active: true },

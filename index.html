@@ -211,6 +211,21 @@ tbody tr.clickable:hover{background:var(--bg)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 @media (prefers-reduced-motion:reduce){.stage-badge .dot{animation:none}}
 
+/* The depth scan's own furniture. The prompt has to be readable over
+   whatever the camera happens to be showing, which is why it carries
+   its own dark ground rather than trusting the video behind it. */
+.stage-prompt{position:absolute;left:50%;bottom:14%;transform:translateX(-50%);
+  background:rgba(11,15,26,.82);color:#fff;padding:9px 16px;border-radius:22px;
+  font-size:13px;font-weight:600;text-align:center;max-width:86%;backdrop-filter:blur(5px);
+  box-shadow:0 4px 18px rgba(0,0,0,.35)}
+.scan-bar{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.18)}
+.scan-bar i{display:block;height:100%;width:0;background:var(--brand);transition:width .18s linear}
+/* A card is landscape and rectangular; the face guide would have the
+   operator framing an ID book like a portrait. */
+.stage-card-guide{position:absolute;inset:0;pointer-events:none;display:flex;align-items:center;justify-content:center}
+.stage-card-guide::before{content:'';width:82%;aspect-ratio:1.586;border:2px dashed rgba(255,255,255,.45);
+  border-radius:10px}
+
 /* Live quality read-out. Values update as the camera runs, so an
    operator fixes the lighting before capturing, not after. */
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:8px;margin-top:10px}

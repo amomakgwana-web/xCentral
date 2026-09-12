@@ -34,6 +34,11 @@ const CONFIGURATION = new Set([
   'biometric_modalities', 'verification_requirements', 'affordability_norms',
   'nca_caps', 'retention_policies', 'capture_quality_rules', 'agents',
   'fraud_rules', 'credit_policies', 'asset_types', 'webhook_endpoints',
+  // There are eleven document types worth naming and thirteen ways a
+  // portrait can fail to belong to the card it is on. Padding either
+  // to two hundred would make the document pages lie about what the
+  // system can actually check.
+  'document_security_features', 'document_forensic_rules',
 ]);
 
 // ── Volume ──────────────────────────────────────────────────────

@@ -43,6 +43,10 @@ provider can disagree with them:
 | Image quality — sharpness, brightness, contrast | `src/capture.js` | `tests/capture-metrics.html` |
 | Capture quality gate and remedies | `assess_capture_quality()` | `capture_tests.sql` |
 | Capture session state machine | `complete_capture_step()` | `capture_tests.sql` |
+| Depth from parallax, and the flat-object fit | `src/vision/depth.js` | `run-vision.mjs` |
+| Face appearance similarity | `src/vision/face.js` | `run-vision.mjs` |
+| Portrait substitution forensics | `src/vision/document.js` | `run-vision.mjs` |
+| Document forensic scoring | `score_document_forensics()`, `localPipeline.js` | `capture_tests.sql` |
 
 **Requires an authority we do not have offline.** These run through the
 provider adapters in `_shared/providers.ts`:
@@ -178,40 +182,152 @@ entity is caught on sight next time.
 
 ## Live capture and onboarding
 
-A wizard that runs the counter flow: scan the identity document, photograph the
-person in front of you, capture a fingerprint, match the two faces, and put it
-to the agents.
+The counter flow, in the order it actually happens: the identity number
+first, then the person, then their document, then everything reconciled
+against everything else.
 
-**What is computed in the browser, from the actual pixels** (`src/capture.js`):
+It runs on a laptop and on a phone. **The camera needs a secure context** —
+that is a browser rule, not a setting. `localhost` counts as secure, a plain
+`http://192.168.x.x` does not, so for a phone on the same network:
 
-| Metric | How |
+```bash
+npm run dev:lan      # mints a self-signed certificate, serves HTTPS, prints the address
+```
+
+Accept the certificate warning once. Without HTTPS the console says so in
+plain words, offers upload instead, and records that the capture was uploaded
+rather than taken — because an uploaded photograph proves that a file exists,
+not that a person was there.
+
+### 1 · The identity number
+
+Checked arithmetically as it is typed: the check digit, the date of birth it
+encodes, the citizenship digit. The number is hashed with a pepper and
+discarded; what is kept is the hash and the last four digits.
+
+### 2 · The live capture, and the depth scan
+
+Quality is measured from the pixels before anything is templated — sharpness
+as the variance of the Laplacian, brightness and contrast from luminance — and
+a capture below the bar is refused with a remedy an operator can act on. Most
+failed matches are failed photographs.
+
+Then the scan, which is the part that establishes a person was actually there.
+
+**What "3D" and "4D" mean here**, because they are marketing words everywhere
+else:
+
+- **3D** is depth, recovered from parallax. When the camera and subject move
+  relative to one another, every point of a *flat* object moves according to
+  one shared transform — a plane stays a plane. A head does not: the nose is
+  nearer the lens than the ears, so when it turns, the nose sweeps further
+  across the frame. The scan tracks a grid of patches through the movement,
+  fits the single best flat-object transform to how they moved, and measures
+  what is left over. Near zero left over means the subject was flat.
+- **4D** is that depth over time: the sequence of poses, the latency between
+  each prompt and the movement answering it, and the micro-motion of a face at
+  rest.
+
+**The prompts come in a random order per session.** That is what makes it a
+challenge rather than a recording — a video of an earlier scan cannot know
+this session will ask for left before closer.
+
+The decision uses one statistic, because the two halves only mean anything
+together: how much motion was left unexplained, multiplied by how badly the
+flat explanation fitted. On the synthetic scenes a real head scores about 2.7
+and a photograph of one about 0.41.
+
+Only the poses that **rotated** the head count. Parallax comes from turning,
+not from approaching: scaling a dome is almost exactly scaling a plane, so a
+"move closer" pose puts a photograph and a face on equal footing. It is still
+captured — it shows the subject answered a prompt — and left out of the
+arithmetic.
+
+**What it does not do.** It defeats a printed photograph, a screen and a
+pre-recorded video. It does not defeat a live puppeteering attack or a moulded
+3D mask, and the confidence is capped to say so. Certified presentation attack
+detection is ISO/IEC 30107-3 and belongs behind the provider interface.
+
+### 3 · The document, examined rather than read
+
+Photograph the card or upload a scan. What follows is not OCR — it is a
+comparison between the portrait and the card around it, because a portrait
+printed as part of a document and one stuck on top of one are physically
+different objects:
+
+| Measure | What it exploits |
 |---|---|
-| Sharpness | Variance of the Laplacian — a blurred image has little high-frequency content |
-| Brightness | Mean luminance, 0-100 |
-| Contrast | Standard deviation of luminance; a photo of a screen reads low |
-| Faces | Shape Detection API where the browser has it |
-| Motion | Inter-frame difference across a short burst — a held-up photograph barely changes |
+| Noise floor | One print process, one paper, one sensor — one texture. Taken as a percentile, so it comes from each region's smooth majority rather than from whichever has more edges. |
+| Focus falloff | The ratio of fine detail to coarse detail. A card lies in one focal plane; something stuck above it does not. |
+| White point | From the *highlights* of each region, not the average — a face is warmer than a card whoever printed it. Two printers disagree about white. |
+| Border ridge | A physical photograph casts a shadow along its edge, or catches light off tape. Printed ink has nothing there to cast one. |
+| Error level | A region that arrived from another file has been through an encoder the rest of the image has not. |
+| Ghost portrait | Where the card carries a second, smaller copy of the same photograph, substituting one and not the other breaks the pair. The strongest check here. |
 
-Quality is assessed **before** anything is templated or matched, and a capture
-below the bar is refused with a remedy an operator can act on ("move somewhere
-brighter") rather than a code. Most failed matches are failed photographs, and
-telling someone "no match" when the answer is "too dark" produces the wrong
-action.
+Each is a weighted signal held as a row, not a verdict. A document that fails
+them is **referred**, never refused — every one of them has an innocent
+explanation, and only the machine-readable zone failing its check digits is
+decisive, because that is arithmetic rather than inference.
 
-A browser without the Shape Detection API produces an **advisory**, not a
-failure — it lowers confidence and is recorded, but never blocks. A capability
-gap in the browser is not a defect in the photograph.
+The MRZ is **located, not read**: transcribing OCR-B needs a recogniser this
+environment does not have, so the band is found and the operator types what it
+says. The check digits are then verified for real.
 
-**Fingerprints, honestly.** A browser cannot read a fingerprint scanner.
-WebAuthn asks the *device* to verify its owner with its own sensor and returns a
-signed assertion. The template never leaves the secure element — neither the
-page nor the hub ever sees it. So this proves *the enrolled owner of that device
-was present*, not that a particular person's finger was. AFIS-grade capture
-needs a scanner SDK behind the provider interface. The distinction is preserved
-in the schema, the API responses and the UI copy.
+### 4 · Reconciliation
 
-**Face matching** is a provider call. Comparing two faces needs a model trained
-for it; this module's job is to make sure what it sends is worth comparing.
+Four questions, answered separately and shown separately:
+
+- **Is the person at the camera the person on this document?** Both images
+  were captured in this session, so this comparison is made entirely from what
+  was just taken.
+- **Is this the person the authority holds under this identity number?**
+  Simulated, and labelled so on every record. There is no Home Affairs here.
+  What the register does hold is real: the first time an identity number is
+  seen, the portrait on the document it arrived with is enrolled as that
+  identity's reference, and every later presentation is compared against it by
+  the same arithmetic. So it genuinely catches a second person presenting the
+  same number later — which is most of what the real query is for — and it
+  cannot catch a first presentation that was false from the start. That limit
+  is printed in the result rather than left to be inferred.
+- **Is this face already enrolled under a different identity number?** One
+  person holding two identities is the oldest syndicate pattern there is, and
+  it is findable only because every enrolled descriptor is kept in one place.
+- **Is the document itself consistent with itself?**
+
+### What the face comparison actually is
+
+**Not a trained face recogniser.** A face recogniser is a network trained on
+millions of labelled identities whose output is calibrated against a measured
+false-match rate. Nothing here is trained on anything.
+
+What is computed is **appearance similarity**: the cosine of a
+gradient-orientation descriptor and a layout thumbnail, both centred, over an
+illumination-normalised crop. Real arithmetic over real pixels, deterministic,
+and it separates "plainly the same photograph of a person" from "plainly a
+different person". It will not separate identical twins and a large pose or
+age difference will beat it.
+
+Two different faces are alike to begin with — they are both faces — so the
+useful range is narrow and sits well above zero. Measured against the
+synthetic pairs in the test suite: the same person photographed twice under
+different conditions lands around **0.84**, two different people around
+**0.51**. The thresholds sit at 0.72 and 0.62 with a wide referral band
+between them, and they are calibrated against synthetic faces and **no real
+ones**.
+
+The identity *verdict* is issued separately, by the face model behind the
+provider interface — in this environment the simulation model, whose
+similarity is a declared rescaling of the measurement above, written in
+`localPipeline.js` where anyone can read what it was computed from. Swapping in
+a real SDK replaces the verdict and keeps the measurement.
+
+### Fingerprints, honestly
+
+A browser cannot read a fingerprint scanner. WebAuthn asks the *device* to
+verify its owner with its own sensor; the template never leaves the secure
+element. That proves the enrolled owner of that device was present, not that a
+particular person's finger was. AFIS-grade capture needs a scanner SDK. The
+distinction is preserved in the schema, the API responses and the UI copy.
 
 ## The agents
 
@@ -412,6 +528,18 @@ npm run test:console
 # The single file, opened over file:// with nothing serving it — and
 # asserted to fetch nothing over the network
 npm run test:single
+
+# The vision code against scenes whose answer is known by construction:
+# a textured ellipsoid under a real perspective projection against the
+# same render put through an affine warp, a genuine card against one
+# with a portrait pasted on, one face against another
+npm run test:vision
+
+# The whole capture wizard end to end against the real pipeline —
+# three journeys that have to end differently: the applicant's own
+# document, somebody else's, and the same face under a second identity
+# number
+npm run test:wizard
 ```
 
 `harness.sql` recreates just enough of a Supabase project (`auth.users`,

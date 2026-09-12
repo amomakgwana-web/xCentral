@@ -6,3 +6,5 @@ dist
 .vercel
 dist-single
 xcentral-console.html
+.certs
+dist-vision

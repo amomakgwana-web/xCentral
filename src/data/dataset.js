@@ -30,7 +30,7 @@ import {
   client_platforms, consent_texts, document_types, credit_bureaus,
   biometric_modalities, verification_requirements, affordability_norms, nca_caps,
   retention_policies, capture_quality_rules, agents, fraud_rules, credit_policies,
-  asset_types, ncaMinimumExpensesCents,
+  asset_types, document_security_features, document_forensic_rules, ncaMinimumExpensesCents,
 } from './reference.js';
 
 import {
@@ -169,7 +169,7 @@ export function buildDataset(seed = 20260908) {
     client_platforms, consent_texts, document_types, credit_bureaus,
     biometric_modalities, verification_requirements, affordability_norms, nca_caps,
     retention_policies, capture_quality_rules, agents, fraud_rules, credit_policies,
-    asset_types,
+    asset_types, document_security_features, document_forensic_rules,
     // Records, built below.
     profiles: [], subjects: [], consents: [], customers: [],
     addresses: [], address_verifications: [], phone_numbers: [], phone_verifications: [],

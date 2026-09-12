@@ -193,7 +193,20 @@ jobs:
       - name: Capture quality maths
         run: node tests/run-capture-metrics.mjs
 
-      # The whole capture wizard, driven by Chromium's synthetic camera.
+      # The vision code against scenes whose answer is known by
+      # construction: a textured ellipsoid under a real perspective
+      # projection against the same render put through an affine warp,
+      # a genuine card against one with a portrait pasted onto it, one
+      # face against another. Everything under test there makes a claim
+      # about physics, and a claim like that is worth nothing unless
+      # something checks it.
+      - name: Vision maths
+        run: npm run test:vision
+
+      # The whole capture wizard end to end against the real pipeline —
+      # three journeys that have to end differently: the applicant's own
+      # document, somebody else's, and the same face presented under a
+      # second identity number.
       - name: Onboarding wizard end to end
         run: node tests/run-onboarding-wizard.mjs
 
@@ -213,3 +226,10 @@ jobs:
         run: |
           npm run build
           node tests/run-console-pages.mjs
+
+      # And the single-file build, opened over file:// with nothing
+      # serving it. A module script is deferred and a classic one is
+      # not, so this artefact can break while every other suite here
+      # stays green.
+      - name: The single file runs from disk
+        run: npm run test:single

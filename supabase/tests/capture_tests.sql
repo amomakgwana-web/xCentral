@@ -176,4 +176,59 @@ begin
     (select count(distinct domain) from public.agents where active), 7::bigint);
 end $$;
 
+-- ── Document forensics score the way the browser scores ────────
+-- The same findings have to produce the same verdict on both sides of
+-- the provider interface, or a document examined in the page and the
+-- same document examined by the pipeline disagree about whether it is
+-- genuine.
+do $$
+declare r record;
+begin
+  select * into r from public.score_document_forensics(array[]::text[]);
+  perform public.expect('a document with no findings scores 100', r.score, 100);
+  perform public.expect('and passes', r.status, 'passed');
+
+  -- One weak finding is not a document problem. Refusing on it would
+  -- turn every poorly lit photograph into a fraud allegation.
+  select * into r from public.score_document_forensics(array['doc_geometry_wrong']);
+  perform public.expect('a single weak finding still passes', r.status, 'passed');
+
+  -- A failed check digit settles it on its own, whatever else is true,
+  -- because it is arithmetic rather than inference: the data on the
+  -- document does not agree with itself.
+  select * into r from public.score_document_forensics(array['doc_mrz_check_digit_failed']);
+  perform public.expect('a failed check digit is decisive', r.decisive, true);
+  perform public.expect('and fails the document', r.status, 'failed');
+
+  -- Three substitution signals together are what a pasted photograph
+  -- looks like, and no one of them would have been enough.
+  select * into r from public.score_document_forensics(
+    array['portrait_noise_mismatch', 'portrait_edge_step', 'portrait_error_level_mismatch']);
+  perform public.expect('three substitution signals fail the document', r.status, 'failed');
+  perform public.expect('two of them are critical', r.critical_count, 2);
+
+  -- A finding that is not a registered rule cannot silently cost a
+  -- document anything.
+  select * into r from public.score_document_forensics(array['not_a_rule_anyone_registered']);
+  perform public.expect('an unknown finding deducts nothing', r.score, 100);
+
+  perform public.expect('exactly one forensic rule is decisive on its own',
+    (select count(*) from public.document_forensic_rules where decisive and active), 1::bigint);
+
+  -- Every document type the console offers has to have its
+  -- expectations on file, or the forensics run the wrong checks on it.
+  perform public.expect('every identity document type declares its security features',
+    (select count(*) from public.document_types t
+      where t.category = 'identity' and t.active
+        and not exists (select 1 from public.document_security_features f where f.doc_type = t.id)),
+    0::bigint);
+
+  -- A green book has no machine-readable zone, and failing it for not
+  -- having one would be the system inventing a defect.
+  perform public.expect('the green ID book is not expected to carry a machine-readable zone',
+    (select mrz from public.document_security_features where doc_type = 'sa_id_book'), false);
+  perform public.expect('the smart card is',
+    (select mrz from public.document_security_features where doc_type = 'sa_id_card'), true);
+end $$;
+
 do $$ begin raise notice '───────────  ALL CAPTURE TESTS PASSED  ───────────'; end $$;

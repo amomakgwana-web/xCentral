@@ -72,7 +72,7 @@ const PAGES = [
   { id: 'documents',  label: 'Docs',     title: 'Document Verification',        sub: 'MRZ check digits · authenticity · expiry · private storage' },
   { id: 'credit',     label: 'Credit',   title: 'Credit Verification',          sub: 'Bureau enquiries · NCA Regulation 23A affordability' },
   { id: 'biometrics', label: 'Bio',      title: 'Biometric Verification',       sub: 'Face match · liveness · duplicate enrolment' },
-  { id: 'onboard',    label: 'Capture',  title: 'Live Capture & Onboarding',    sub: 'Scan the document, photograph the person, match them, let the agents decide' },
+  { id: 'onboard',    label: 'Capture',  title: 'Live Capture & Onboarding',    sub: 'The identity number, the person, their document — then everything reconciled against everything else' },
   { id: 'customers',  label: 'People',   title: 'Customers',                    sub: 'Profiles, background vetting and credit capacity' },
   { id: 'portfolio',  label: 'Book',     title: 'Assets & Agreements',          sub: 'What is financed, on what terms, against which asset' },
   { id: 'payments',   label: 'Pay',      title: 'Payments & Arrears',           sub: 'What was due, what arrived, and who is behind' },
@@ -1856,36 +1856,77 @@ const WIZ = {
   sessionId: null,
   stream: null,
   cameraOn: false,
+  facing: 'user',
+  cameras: [],
   metricsTimer: null,
-  captures: {},
-  match: null,
-  run: null,
-  liveness: null,
-  fingerprint: null,
+  identity: null,
   subject: null,
+  consented: false,
+  level: 'standard',
+  selfie: null,       // { descriptor, metrics, source }
+  depth: null,        // the analysed scan
+  document: null,     // { docType, findings, portraitDescriptor, metrics, source }
+  mrz: null,          // parsed machine-readable zone, once typed
+  reconciliation: null,
+  run: null,
 };
 
 const WIZ_STEPS = [
-  { id: 'subject',  label: 'Applicant' },
-  { id: 'document', label: 'Scan document' },
-  { id: 'selfie',   label: 'Live photograph' },
-  { id: 'finger',   label: 'Fingerprint' },
+  { id: 'identity', label: 'Identity number' },
+  { id: 'live',     label: 'Live capture' },
+  { id: 'document', label: 'Identity document' },
+  { id: 'reconcile', label: 'Reconciliation' },
   { id: 'decide',   label: 'Agents decide' },
 ];
 
 let CAPTURE_LIB = null;
 async function captureLib() {
-  // The same module the pipeline's quality thresholds were written
-  // against — one implementation, loaded on demand because it is only
-  // needed on this page.
-  if (!CAPTURE_LIB) CAPTURE_LIB = await import('./capture.js');
+  // Loaded on demand: the camera, the descriptor and the forensics are
+  // only needed on this page, and they are the heaviest code in the
+  // console.
+  if (!CAPTURE_LIB) {
+    const [capture, face, depth, docs] = await Promise.all([
+      import('./capture.js'),
+      import('./vision/face.js'),
+      import('./vision/depth.js'),
+      import('./vision/document.js'),
+    ]);
+    CAPTURE_LIB = { ...capture, face, depth, docs };
+  }
   return CAPTURE_LIB;
+}
+
+// getUserMedia is refused outside a secure context, and no amount of
+// permission granting changes that. Saying so precisely — with the
+// address that would work — is the difference between a two-minute fix
+// and an afternoon spent blaming the camera.
+function cameraContext() {
+  if (typeof window === 'undefined') return { ok: false, reason: 'no_window' };
+  const host = location.hostname;
+  const localish = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost');
+  if (location.protocol === 'https:' || localish) return { ok: true };
+  if (location.protocol === 'file:') {
+    return {
+      ok: false,
+      reason: 'file_url',
+      advice: 'This page was opened straight from disk. Browsers refuse camera access to a file:// '
+            + 'address however the permissions are set. Run it from a server — `npm run dev` and '
+            + 'open http://localhost:5173 — and the camera works.',
+    };
+  }
+  return {
+    ok: false,
+    reason: 'insecure_origin',
+    advice: `This page is served over plain HTTP from ${host}. Camera access needs HTTPS, or `
+          + 'localhost. On a phone, open it over HTTPS — `npm run dev:lan` prints an address '
+          + 'that works, once you accept its certificate.',
+  };
 }
 
 function stepRail() {
   return `<div class="steps">${WIZ_STEPS.map((st, i) => `
     <div class="step ${i === WIZ.step ? 'active' : ''} ${i < WIZ.step ? 'done' : ''}">
-      <span class="step-no">${i < WIZ.step ? '✓' : i + 1}</span>${esc(st.label)}
+      <span class="step-no">${i < WIZ.step ? '&#10003;' : i + 1}</span>${esc(st.label)}
     </div>`).join('')}</div>`;
 }
 
@@ -1898,8 +1939,9 @@ function metricTile(label, value, state, suffix = '') {
 
 RENDER.onboard = async () => {
   const lib = await captureLib();
-  const hasCamera = lib.cameraAvailable();
-  const hasFaceApi = lib.faceDetectionAvailable();
+  const ctx = cameraContext();
+  const hasCamera = ctx.ok && lib.cameraAvailable();
+  const hasFaceApi = lib.face.shapeDetectionAvailable();
   // Sessions already adjudicated are shown below the wizard. Without
   // this the agents can only be seen by running a live capture, which
   // makes the most explainable part of the system the hardest to look
@@ -1916,13 +1958,13 @@ RENDER.onboard = async () => {
   ${stepRail()}
   <div class="g2" style="align-items:start">
     <div class="card" style="margin-top:0">
-      <div class="card-hdr"><div><div class="card-title" id="wizTitle">Applicant</div>
-        <div class="card-sub" id="wizSub">Who is being onboarded, and under what consent</div></div></div>
+      <div class="card-hdr"><div><div class="card-title" id="wizTitle">Identity number</div>
+        <div class="card-sub" id="wizSub">Who is being verified, and under what consent</div></div></div>
       <div class="card-body" id="wizBody">${loading()}</div>
     </div>
 
     <div class="card" style="margin-top:0">
-      <div class="card-hdr"><div><div class="card-title">Capture</div>
+      <div class="card-hdr"><div><div class="card-title">Camera</div>
         <div class="card-sub">Quality is measured from the pixels, live</div></div>
         <div class="card-actions" id="stageActions"></div></div>
       <div class="card-body">
@@ -1931,7 +1973,7 @@ RENDER.onboard = async () => {
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor">
               <rect x="2" y="5" width="16" height="11" rx="2"/><circle cx="10" cy="10.5" r="3"/>
               <path d="M7 5l1-1.6h4L13 5" stroke-linejoin="round"/></svg>
-            <div>The camera starts at the scan and photograph steps.</div>
+            <div>The camera starts at the live capture and document steps.</div>
           </div>
         </div>
         <div class="metrics" id="metrics"></div>
@@ -1941,13 +1983,14 @@ RENDER.onboard = async () => {
   </div>
 
   ${!hasCamera ? `<div class="note note-warn">
-    <b>No camera is available in this context.</b> Captures fall back to file upload, which is a
-    weaker signal — an uploaded selfie proves far less than one taken under observation, and the
-    system records which it was.</div>` : ''}
+    <b>No camera is available here.</b> ${esc(ctx.advice ?? 'This browser or context has no camera access.')}
+    Captures fall back to file upload, which is a weaker signal — an uploaded photograph proves far
+    less than one taken under observation, the depth scan cannot run at all, and the system records
+    which it was.</div>` : ''}
   ${!hasFaceApi ? `<div class="note note-info">
-    <b>Face detection is not available in this browser.</b> Sharpness, brightness and contrast are
-    still measured from the pixels; face presence and framing are recorded as
-    <i>not measured</i> rather than assumed, so a missing detector never reads as a missing face.</div>` : ''}
+    <b>This browser has no face detector.</b> Faces are located by a chroma-and-shape method instead,
+    which is weaker: it finds the largest skin-toned region of roughly the right shape. Every result
+    carries the method that produced it, so a coarse locator never reads as a detection.</div>` : ''}
 
   <div class="card" id="agentCard" style="display:none">
     <div class="card-hdr"><div><div class="card-title">Agent adjudication</div>
@@ -1979,7 +2022,8 @@ RENDER.onboard = async () => {
                   <span class="mono muted">${esc(run.confidence)}%</span>
                   ${run.vetoed_by ? `<span class="veto-tag">veto</span>` : ''}`
                  : '<span class="muted">Not yet run</span>'}</td>
-            <td>${run?.human_outcome ? badge(run.human_outcome === 'accepted' ? 'passed'
+            <td>${run?.human_outcome && run.human_outcome !== 'pending'
+                 ? badge(run.human_outcome === 'accepted' ? 'passed'
                       : run.human_outcome === 'overridden' ? 'review' : 'pending')
                  : '<span class="muted">—</span>'}</td>
             <td class="muted">${esc(fmtDateTime(sn.started_at))}</td>
@@ -1994,8 +2038,11 @@ RENDER.onboard = async () => {
 
 WIRE.onboard = () => {
   WIZ.step = 0;
-  WIZ.captures = {};
-  WIZ.match = null;
+  WIZ.selfie = null;
+  WIZ.depth = null;
+  WIZ.document = null;
+  WIZ.mrz = null;
+  WIZ.reconciliation = null;
   WIZ.run = null;
   renderWizStep();
 
@@ -2077,6 +2124,11 @@ async function openAdjudication(sessionId) {
   }
 }
 
+function gotoStep(n) {
+  WIZ.step = n;
+  renderWizStep();
+}
+
 function renderWizStep() {
   const body = document.getElementById('wizBody');
   const title = document.getElementById('wizTitle');
@@ -2085,151 +2137,75 @@ function renderWizStep() {
   if (!body) return;
 
   document.querySelectorAll('.steps').forEach((el) => { el.outerHTML = stepRail(); });
-  actions.innerHTML = '';
+  if (actions) actions.innerHTML = '';
 
   const step = WIZ_STEPS[WIZ.step];
-
-  if (step.id === 'subject') {
-    title.textContent = 'Applicant';
-    sub.textContent = 'Who is being onboarded, and under what consent';
-    const platforms = JSON.parse(document.getElementById('wizPlatforms')?.value ?? '[]');
-    body.innerHTML = `
-      <div class="field"><label for="wizPlatform">Platform</label>
-        <select id="wizPlatform">${platforms.map((p) =>
-          `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></div>
-      <div class="row2">
-        <div class="field"><label for="wizFirst">First names</label><input id="wizFirst" placeholder="Thabo"></div>
-        <div class="field"><label for="wizSurname">Surname</label><input id="wizSurname" placeholder="Mokoena"></div>
-      </div>
-      <div class="field"><label for="wizId">SA ID number</label>
-        <input id="wizId" class="mono" maxlength="20" placeholder="13 digits">
-        <div class="hint" id="wizIdHint">Checked arithmetically as you type. The number is never stored — only a peppered hash.</div></div>
-      <div class="field"><label for="wizChannel">Where is this happening?</label>
-        <select id="wizChannel">
-          <option value="branch">Branch counter</option>
-          <option value="dealership">Dealership floor</option>
-          <option value="field_agent">Field agent</option>
-          <option value="self_service">Self-service — applicant's own device</option>
-        </select>
-        <div class="hint">An unobserved self-service capture is worth less than one taken at a counter, and is recorded as such.</div></div>
-      <label style="display:flex;gap:8px;align-items:flex-start;font-size:11.5px;line-height:1.55;margin-top:4px">
-        <input type="checkbox" id="wizConsent" style="width:auto;margin-top:2px">
-        <span>The applicant has explicitly consented to biometric processing. POPIA s26 makes biometric
-        data special personal information; s27 requires this and will not accept legitimate interest.</span>
-      </label>
-      <button class="btn btn-primary btn-sm" style="margin-top:14px" id="wizStart">Start capture session</button>
-      <div id="wizStartResult"></div>`;
-
-    const idInput = document.getElementById('wizId');
-    idInput.addEventListener('input', async () => {
-      const hint = document.getElementById('wizIdHint');
-      const v = idInput.value.trim();
-      if (v.replace(/\D/g, '').length !== 13) {
-        hint.textContent = 'Checked arithmetically as you type. The number is never stored — only a peppered hash.';
-        hint.style.color = '';
-        return;
-      }
-      try {
-        const r = await DB.validateSaId(v);
-        hint.textContent = r.valid
-          ? `Valid · born ${fmtDate(r.date_of_birth)} · ${titleCase(r.gender)} · ${titleCase(r.citizenship)}`
-          : `Not valid — ${(r.reason_codes ?? []).map(titleCase).join(', ')}`;
-        hint.style.color = r.valid ? 'var(--gr2)' : 'var(--red)';
-      } catch { /* leave the hint as it was */ }
-    });
-
-    document.getElementById('wizStart').addEventListener('click', startSession);
-    return;
-  }
-
-  if (step.id === 'document') {
-    title.textContent = 'Scan the identity document';
-    sub.textContent = 'The portrait on the document becomes the reference the live photograph is matched against';
-    body.innerHTML = `
-      <div class="note note-info">Photograph the document itself, flat and filling the frame.
-      A picture of a screen showing the document reads as low contrast and will be refused.</div>
-      <div class="field" style="margin-top:12px"><label for="wizDocType">Document type</label>
-        <select id="wizDocType">
-          <option value="sa_id_card">SA Smart ID Card</option>
-          <option value="sa_id_book">SA Green Barcoded ID Book</option>
-          <option value="passport">Passport</option>
-          <option value="drivers_licence">SA Driving Licence Card</option>
-        </select></div>
-      <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:10px">
-        <button class="btn btn-primary btn-sm" id="wizDocCapture">Capture from camera</button>
-        <button class="btn btn-sm" id="wizDocUploadBtn">Upload instead</button>
-        <input type="file" id="wizDocUpload" accept="image/*" hidden>
-      </div>
-      <div id="wizDocResult"></div>`;
-
-    document.getElementById('wizDocCapture').addEventListener('click', () => doCapture('document_front'));
-    document.getElementById('wizDocUploadBtn').addEventListener('click',
-      () => document.getElementById('wizDocUpload').click());
-    document.getElementById('wizDocUpload').addEventListener('change', (e) => {
-      if (e.target.files?.[0]) doUpload('document_front', e.target.files[0]);
-    });
-    startStage('environment');
-    return;
-  }
-
-  if (step.id === 'selfie') {
-    title.textContent = 'Photograph the applicant';
-    sub.textContent = 'Liveness is checked first — a match computed from a photograph is worse than no match';
-    body.innerHTML = `
-      <div class="note note-info">The applicant should look straight at the camera, with their face
-      filling the guide. Liveness runs before the comparison: if the capture fails it, no similarity
-      is computed at all.</div>
-      <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:12px">
-        <button class="btn btn-primary btn-sm" id="wizSelfieCapture">Capture and match</button>
-        <button class="btn btn-sm" id="wizSelfieUploadBtn">Upload instead</button>
-        <input type="file" id="wizSelfieUpload" accept="image/*" hidden>
-      </div>
-      <div id="wizSelfieResult"></div>`;
-
-    document.getElementById('wizSelfieCapture').addEventListener('click', () => doCapture('selfie'));
-    document.getElementById('wizSelfieUploadBtn').addEventListener('click',
-      () => document.getElementById('wizSelfieUpload').click());
-    document.getElementById('wizSelfieUpload').addEventListener('change', (e) => {
-      if (e.target.files?.[0]) doUpload('selfie', e.target.files[0]);
-    });
-    startStage('user');
-    return;
-  }
-
-  if (step.id === 'finger') {
-    title.textContent = 'Fingerprint';
-    sub.textContent = 'The device verifies its owner with its own sensor';
-    stopStage();
-    body.innerHTML = `
-      <div class="note note-warn">
-        <b>What this actually proves, and what it does not.</b> A browser cannot read a fingerprint
-        scanner. WebAuthn asks the device to verify its owner with its own sensor and returns a
-        signed assertion — the template never leaves the secure element, and neither this page nor
-        the hub ever sees it. So this proves <i>the enrolled owner of this device was present</i>,
-        not that a particular person's finger was. AFIS-grade capture needs a scanner behind the
-        provider interface.
-      </div>
-      <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:12px">
-        <button class="btn btn-primary btn-sm" id="wizFinger">Capture fingerprint</button>
-        <button class="btn btn-sm" id="wizFingerSkip">Skip this step</button>
-      </div>
-      <div id="wizFingerResult"></div>`;
-
-    document.getElementById('wizFinger').addEventListener('click', doFingerprint);
-    document.getElementById('wizFingerSkip').addEventListener('click', () => {
-      WIZ.step = 4; renderWizStep(); runAgents();
-    });
-    return;
-  }
-
-  // decide
-  title.textContent = 'Decision';
-  sub.textContent = 'What the agents concluded, and what you do with it';
-  stopStage();
-  body.innerHTML = `<div id="wizDecideBody">${loading()}</div>`;
+  if (step.id === 'identity') return renderIdentityStep(body, title, sub);
+  if (step.id === 'live') return renderLiveStep(body, title, sub);
+  if (step.id === 'document') return renderDocumentStep(body, title, sub);
+  if (step.id === 'reconcile') return renderReconcileStep(body, title, sub);
+  return renderDecideStep(body, title, sub);
 }
 
-// ── Session ─────────────────────────────────────────────────────
+// ── 1 · The identity number ─────────────────────────────────────
+function renderIdentityStep(body, title, sub) {
+  stopStage();
+  title.textContent = 'Identity number';
+  sub.textContent = 'Everything that follows is checked against this';
+  const platforms = JSON.parse(document.getElementById('wizPlatforms')?.value ?? '[]');
+
+  body.innerHTML = `
+    <div class="field"><label for="wizId">SA ID number</label>
+      <input id="wizId" class="mono" maxlength="20" inputmode="numeric" placeholder="13 digits">
+      <div class="hint" id="wizIdHint">Checked arithmetically as you type — the check digit, the date
+      of birth it encodes, and the citizenship digit. The number itself is never stored; only a
+      peppered hash and the last four digits.</div></div>
+    <div class="row2">
+      <div class="field"><label for="wizFirst">First names</label><input id="wizFirst" placeholder="As printed on the document"></div>
+      <div class="field"><label for="wizSurname">Surname</label><input id="wizSurname" placeholder="As printed on the document"></div>
+    </div>
+    <div class="field"><label for="wizPlatform">Platform</label>
+      <select id="wizPlatform">${platforms.map((p) =>
+        `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></div>
+    <div class="field"><label for="wizChannel">Where is this happening?</label>
+      <select id="wizChannel">
+        <option value="self_service">Self-service — this device</option>
+        <option value="branch">Branch counter</option>
+        <option value="dealership">Dealership floor</option>
+        <option value="field_agent">Field agent</option>
+      </select>
+      <div class="hint">An unobserved capture on the applicant's own device is worth less than one
+      taken at a counter, and is recorded as such rather than quietly treated the same.</div></div>
+    <label style="display:flex;gap:8px;align-items:flex-start;font-size:11.5px;line-height:1.55;margin-top:4px">
+      <input type="checkbox" id="wizConsent" style="width:auto;margin-top:2px">
+      <span>The applicant has explicitly consented to biometric processing. POPIA s26 makes biometric
+      data special personal information; s27 requires explicit consent and will not accept
+      legitimate interest.</span>
+    </label>
+    <button class="btn btn-primary btn-sm" style="margin-top:14px" id="wizStart">Begin verification</button>
+    <div id="wizStartResult"></div>`;
+
+  const idInput = document.getElementById('wizId');
+  idInput.addEventListener('input', async () => {
+    const hint = document.getElementById('wizIdHint');
+    const v = idInput.value.trim();
+    if (v.replace(/\D/g, '').length !== 13) {
+      hint.textContent = 'Checked arithmetically as you type. The number is never stored — only a peppered hash.';
+      hint.style.color = '';
+      return;
+    }
+    try {
+      const r = await DB.validateSaId(v);
+      hint.textContent = r.valid
+        ? `Valid · born ${fmtDate(r.date_of_birth)} · ${titleCase(r.gender)} · ${titleCase(r.citizenship)}`
+        : `Not valid — ${(r.reason_codes ?? []).map(titleCase).join(', ')}`;
+      hint.style.color = r.valid ? 'var(--gr2)' : 'var(--red)';
+    } catch { /* leave the hint as it was */ }
+  });
+
+  document.getElementById('wizStart').addEventListener('click', startSession);
+}
+
 async function startSession() {
   const out = document.getElementById('wizStartResult');
   const platformId = document.getElementById('wizPlatform').value;
@@ -2239,76 +2215,802 @@ async function startSession() {
   const channel = document.getElementById('wizChannel').value;
   const consented = document.getElementById('wizConsent').checked;
 
-  if (!idNumber) { toast('An ID number is required', 'err'); return; }
+  if (!idNumber) { toast('An identity number is required', 'err'); return; }
   if (!consented) {
     out.innerHTML = `<div class="note note-danger" style="margin-top:12px">
-      <b>Consent is a precondition, not a formality.</b> The database refuses to store a biometric
-      template without it — this is a constraint, not a checkbox the code can skip.</div>`;
+      <b>Consent is a precondition, not a formality.</b> No template is computed without it — this is
+      a constraint the pipeline enforces, not a checkbox the code steps over.</div>`;
     return;
   }
 
   out.innerHTML = loading();
   try {
-    // Identity first: the case establishes the subject the captures
-    // will hang off, and a customer cannot exist without it.
     const identity = await DB.verifyIdentity({
       idNumber, firstNames, surname, platformId, level: 'standard', purpose: 'onboarding',
     });
-    WIZ.subject = { id: identity.subjectId, caseId: identity.caseId, name: [firstNames, surname].filter(Boolean).join(' ') };
+    WIZ.identity = identity.identity;
+    WIZ.consented = true;
+    WIZ.subject = {
+      id: identity.subjectId,
+      caseId: identity.caseId,
+      name: [firstNames, surname].filter(Boolean).join(' ') || 'Applicant',
+    };
 
     const session = await DB.openCaptureSession({
       platformId,
       caseId: identity.caseId,
       subjectId: identity.subjectId,
       channel,
-      requiredSteps: ['consent', 'document', 'selfie', 'match'],
+      deviceLabel: deviceLabel(),
+      requiredSteps: ['consent', 'selfie', 'document', 'match'],
     });
     WIZ.sessionId = session.sessionId;
 
-    out.innerHTML = `<div class="note note-info" style="margin-top:12px">
-      Session <b>${esc(session.sessionId)}</b> open · case <b>${esc(identity.caseId)}</b>.
-      ${identity.identity?.structureValid
-        ? `Identity number valid · born ${fmtDate(identity.identity.dateOfBirth)}.`
-        : `<span style="color:var(--red)">Identity number failed its check digit.</span>`}
+    out.innerHTML = `<div class="note ${identity.identity.structureValid ? 'note-info' : 'note-danger'}" style="margin-top:12px">
+      Session <b>${esc(session.sessionId)}</b> open · case <b>${esc(identity.caseId)}</b>.<br>
+      ${identity.identity.structureValid
+        ? `The number checks out: born ${fmtDate(identity.identity.dateOfBirth)},
+           ${esc(titleCase(identity.identity.gender ?? ''))},
+           ${esc(titleCase(identity.identity.citizenship ?? ''))}.
+           Stored as <span class="mono">••• ${esc(identity.identity.last4)}</span> and a hash.`
+        : `<b>This number fails its own arithmetic</b> —
+           ${esc((identity.identity.reasonCodes ?? []).map(titleCase).join(', '))}.
+           The session continues so the rest can be captured, and the identity agent will veto.`}
       </div>`;
 
-    WIZ.step = 1;
-    setTimeout(renderWizStep, 600);
+    setTimeout(() => gotoStep(1), 700);
   } catch (e) {
     out.innerHTML = errorState(e);
   }
 }
 
-// ── Camera stage ────────────────────────────────────────────────
-async function startStage(facingMode) {
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  const kind = /iPhone|iPad|Android/i.test(ua) ? 'Phone or tablet'
+    : /Macintosh/i.test(ua) ? 'Mac'
+      : /Windows/i.test(ua) ? 'Windows PC' : 'This device';
+  return `${kind} · ${location.hostname || 'local'}`;
+}
+
+// ── 2 · The live capture, with the depth scan ───────────────────
+function renderLiveStep(body, title, sub) {
+  title.textContent = 'Live capture';
+  sub.textContent = 'A photograph of the person, and a scan that proves they were there';
+
+  const done = Boolean(WIZ.selfie);
+  body.innerHTML = `
+    <div class="note note-info">
+      <b>Two things happen here, and they answer different questions.</b>
+      The photograph is what gets compared to the document. The scan is what establishes that a
+      person was in front of the camera at all — you will be asked to turn your head, and the
+      movement is measured for parallax, which a printed photograph and a screen cannot produce.
+      The prompts come in a random order, so a recording of an earlier scan does not fit.
+    </div>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:12px">
+      <button class="btn btn-primary btn-sm" id="wizLiveGo">${done ? 'Retake' : 'Photograph and scan'}</button>
+      <button class="btn btn-sm" id="wizLivePhotoOnly">Photograph only</button>
+      <button class="btn btn-sm" id="wizLiveUploadBtn">Upload a photograph</button>
+      <input type="file" id="wizLiveUpload" accept="image/*" capture="user" hidden>
+    </div>
+    <div id="wizLiveResult">${done ? renderSelfieSummary() : ''}</div>`;
+
+  document.getElementById('wizLiveGo').addEventListener('click', () => runLiveCapture(true));
+  document.getElementById('wizLivePhotoOnly').addEventListener('click', () => runLiveCapture(false));
+  document.getElementById('wizLiveUploadBtn').addEventListener('click',
+    () => document.getElementById('wizLiveUpload').click());
+  document.getElementById('wizLiveUpload').addEventListener('change', (e) => {
+    if (e.target.files?.[0]) uploadSelfie(e.target.files[0]);
+  });
+
+  startStage('user');
+}
+
+async function runLiveCapture(withScan) {
+  const out = document.getElementById('wizLiveResult');
+  const video = document.getElementById('stageVideo');
+  if (!video || !WIZ.cameraOn) { toast('Start the camera first', 'err'); return; }
+
+  const lib = await captureLib();
+  out.innerHTML = loading();
+
+  try {
+    const measured = await lib.captureAndMeasure(video, { captureType: 'selfie' });
+    document.getElementById('metrics').innerHTML = renderMetrics(measured.metrics, measured.faces);
+
+    const quality = await DB.checkCaptureQuality('selfie', measured.metrics);
+    if (quality.passed === false) {
+      out.innerHTML = refusal(quality);
+      return;
+    }
+
+    const descriptor = await lib.face.faceDescriptor(measured.canvas);
+    if (!descriptor) {
+      out.innerHTML = `<div class="note note-danger" style="margin-top:12px">
+        <b>No face could be located in that photograph.</b> Nothing can be compared without one.
+        Move into the guide, make sure the light is on your face rather than behind you, and retake.</div>`;
+      return;
+    }
+
+    WIZ.selfie = {
+      descriptor,
+      metrics: measured.metrics,
+      source: 'live_camera',
+      quality,
+    };
+
+    await DB.submitCapture({
+      sessionId: WIZ.sessionId,
+      captureType: 'selfie',
+      source: 'live_camera',
+      metrics: measured.metrics,
+      quality,
+      descriptor: Array.from(descriptor.vector),
+    });
+
+    if (!withScan) {
+      WIZ.depth = null;
+      out.innerHTML = renderSelfieSummary()
+        + `<div class="note note-warn" style="margin-top:10px">
+            <b>No depth scan was run.</b> The photograph can still be compared to the document, but
+            nothing here establishes that a person was present rather than a photograph of one.</div>`
+        + continueButton('wizToDoc', 'Continue to the document');
+      document.getElementById('wizToDoc').addEventListener('click', () => gotoStep(2));
+      return;
+    }
+
+    await runDepthScan(out, lib, video);
+  } catch (e) {
+    out.innerHTML = errorState(e);
+  }
+}
+
+async function runDepthScan(out, lib, video) {
+  const stage = document.getElementById('stage');
+  const prompt = document.createElement('div');
+  prompt.className = 'stage-prompt';
+  stage.appendChild(prompt);
+  const bar = document.createElement('div');
+  bar.className = 'scan-bar';
+  bar.innerHTML = '<i></i>';
+  stage.appendChild(bar);
+
+  out.innerHTML = `<div class="note note-info" style="margin-top:12px">
+    <b>Scanning.</b> Follow the prompt on the camera. Move your head, not the device — the
+    measurement is the difference between the two.</div>`;
+
+  try {
+    const scan = await lib.depth.runDepthScan(video, {
+      grabFrame: lib.grabFrame,
+      onPrompt: (pose, i, n) => { prompt.textContent = `${i + 1} of ${n} · ${pose.prompt}`; },
+      onProgress: (p) => { bar.firstChild.style.width = `${Math.round(p * 100)}%`; },
+    });
+    prompt.textContent = 'Working out the geometry…';
+    const analysis = await lib.depth.analyseDepthScan(scan);
+    WIZ.depth = analysis;
+
+    await DB.submitCapture({
+      sessionId: WIZ.sessionId,
+      captureType: 'depth_scan',
+      source: 'live_camera',
+      metrics: { width: null, height: null },
+      quality: { score: analysis.confidence, passed: analysis.verdict !== 'flat', reason_codes: [] },
+    });
+
+    prompt.remove();
+    bar.remove();
+
+    out.innerHTML = renderSelfieSummary() + renderDepth(analysis)
+      + continueButton('wizToDoc', 'Continue to the document');
+    document.getElementById('wizToDoc').addEventListener('click', () => gotoStep(2));
+  } catch (e) {
+    prompt.remove();
+    bar.remove();
+    out.innerHTML = renderSelfieSummary()
+      + `<div class="note note-warn" style="margin-top:10px">
+          <b>The scan did not complete:</b> ${esc(e.message)}. The photograph stands; presence does not.</div>`
+      + continueButton('wizToDoc', 'Continue to the document');
+    document.getElementById('wizToDoc').addEventListener('click', () => gotoStep(2));
+  }
+}
+
+async function uploadSelfie(file) {
+  const out = document.getElementById('wizLiveResult');
+  out.innerHTML = loading();
+  try {
+    const lib = await captureLib();
+    const canvas = await lib.fileToCanvas(file);
+    const measured = await lib.captureAndMeasure(canvas, { captureType: 'selfie' });
+    showFrozen(canvas);
+    document.getElementById('metrics').innerHTML = renderMetrics(measured.metrics, measured.faces);
+
+    const quality = await DB.checkCaptureQuality('selfie', measured.metrics);
+    if (quality.passed === false) { out.innerHTML = refusal(quality); return; }
+
+    const descriptor = await lib.face.faceDescriptor(canvas);
+    if (!descriptor) {
+      out.innerHTML = '<div class="note note-danger" style="margin-top:12px">No face could be located in that file.</div>';
+      return;
+    }
+
+    WIZ.selfie = { descriptor, metrics: measured.metrics, source: 'upload', quality };
+    WIZ.depth = null;
+    await DB.submitCapture({
+      sessionId: WIZ.sessionId, captureType: 'selfie', source: 'upload',
+      metrics: measured.metrics, quality, descriptor: Array.from(descriptor.vector),
+    });
+
+    out.innerHTML = renderSelfieSummary()
+      + `<div class="note note-warn" style="margin-top:10px">
+          <b>This was uploaded, not captured.</b> An uploaded photograph proves that a file exists.
+          It cannot show that the person was present, and no depth scan is possible on it. The
+          session records the difference.</div>`
+      + continueButton('wizToDoc', 'Continue to the document');
+    document.getElementById('wizToDoc').addEventListener('click', () => gotoStep(2));
+  } catch (e) {
+    out.innerHTML = errorState(e);
+  }
+}
+
+function renderSelfieSummary() {
+  if (!WIZ.selfie) return '';
+  const d = WIZ.selfie.descriptor;
+  return `<div class="note note-info" style="margin-top:12px">
+    <b>Photograph accepted — quality ${esc(WIZ.selfie.quality?.score ?? '—')}.</b><br>
+    A ${esc(d.dimensions)}-dimension descriptor was computed and the image discarded.
+    Face located by <b>${esc(d.method.replace(/_/g, ' '))}</b>, aligned on
+    <b>${esc(d.alignment.replace(/_/g, ' '))}</b>.
+    </div>`;
+}
+
+function renderDepth(a) {
+  const tone = a.verdict === 'three_dimensional' ? 'note-info'
+    : a.verdict === 'flat' ? 'note-danger' : 'note-warn';
+  const label = a.verdict === 'three_dimensional' ? 'Depth confirmed'
+    : a.verdict === 'flat' ? 'Flat — presentation attack'
+      : a.verdict === 'not_measured' ? 'Nothing measured' : 'Inconclusive';
+
+  return `<div class="note ${tone}" style="margin-top:10px">
+    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+      <b style="font-size:13px">${esc(label)}</b>
+      <span class="badge b-${a.verdict === 'three_dimensional' ? 'passed'
+        : a.verdict === 'flat' ? 'failed' : 'review'}">${esc(a.confidence)}% confidence</span>
+    </div>
+    <div style="margin-top:7px">${esc(a.note)}</div>
+    <dl class="kv" style="margin-top:9px">
+      <dt>Depth evidence</dt><dd class="mono">${esc(a.depthEvidence)}
+        <span class="muted">(flat below ${esc(a.thresholds.flatEvidence)}, live above ${esc(a.thresholds.liveEvidence)})</span></dd>
+      <dt>Relief</dt><dd class="mono">${esc(a.reliefPct)}% of face width</dd>
+      <dt>Flat-object fit</dt><dd class="mono">R² ${esc(a.planarityR2)}
+        <span class="muted">— how much of the motion one rigid plane explains</span></dd>
+      <dt>Central parallax</dt><dd class="mono">${esc(a.centralParallax)}</dd>
+      <dt>Prompts</dt><dd>${esc(a.posesRequested.join(' → '))} · ${esc(a.posesAnswered)} answered
+        <span class="muted">· counted: ${esc((a.posesCounted ?? []).join(', ') || 'none')}</span></dd>
+      <dt>Micro-motion</dt><dd class="mono">${esc(a.microMotion.motion ?? '—')}</dd>
+      <dt>Face found by</dt><dd>${esc(a.faceLocatedBy.replace(/_/g, ' '))}</dd>
+    </dl>
+    <div style="margin-top:8px;font-size:11px;color:var(--ink3)">${esc(a.limits)}</div>
+  </div>`;
+}
+
+// ── 3 · The identity document ───────────────────────────────────
+function renderDocumentStep(body, title, sub) {
+  title.textContent = 'Identity document';
+  sub.textContent = 'Photograph it or upload it — then it gets examined, not just read';
+
+  body.innerHTML = `
+    <div class="note note-info">
+      <b>Hold the card flat and fill the frame.</b> The examination compares the portrait against the
+      card around it — its texture, focus, colour and compression — so the more of the card in shot,
+      the more there is to compare it with. A photograph of a screen showing the document is
+      detected and reported as such.
+    </div>
+    <div class="field" style="margin-top:12px"><label for="wizDocType">Document type</label>
+      <select id="wizDocType">
+        <option value="sa_id_card">SA Smart ID Card</option>
+        <option value="sa_id_book">SA Green Barcoded ID Book</option>
+        <option value="passport">Passport</option>
+        <option value="drivers_licence">SA Driving Licence Card</option>
+        <option value="asylum_permit">Asylum Seeker / Refugee Permit</option>
+      </select></div>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:10px">
+      <button class="btn btn-primary btn-sm" id="wizDocCapture">Photograph the document</button>
+      <button class="btn btn-sm" id="wizDocUploadBtn">Upload or scan a file</button>
+      <input type="file" id="wizDocUpload" accept="image/*" capture="environment" hidden>
+    </div>
+    <div id="wizDocResult"></div>`;
+
+  document.getElementById('wizDocCapture').addEventListener('click', () => captureDocument('live_camera'));
+  document.getElementById('wizDocUploadBtn').addEventListener('click',
+    () => document.getElementById('wizDocUpload').click());
+  document.getElementById('wizDocUpload').addEventListener('change', (e) => {
+    if (e.target.files?.[0]) captureDocument('upload', e.target.files[0]);
+  });
+
+  // The rear camera, where there is one: nobody photographs a card
+  // with the selfie lens.
+  startStage('environment');
+}
+
+async function captureDocument(source, file) {
+  const out = document.getElementById('wizDocResult');
+  const docType = document.getElementById('wizDocType').value;
+  const lib = await captureLib();
+  out.innerHTML = loading();
+
+  try {
+    let canvas;
+    if (source === 'upload') {
+      canvas = await lib.fileToCanvas(file);
+      showFrozen(canvas);
+    } else {
+      const video = document.getElementById('stageVideo');
+      if (!video || !WIZ.cameraOn) { toast('Start the camera first', 'err'); out.innerHTML = ''; return; }
+      canvas = lib.grabFrame(video);
+      showFrozen(canvas);
+    }
+
+    const measured = await lib.captureAndMeasure(canvas, { captureType: 'document_front' });
+    document.getElementById('metrics').innerHTML = renderMetrics(measured.metrics, measured.faces);
+
+    const quality = await DB.checkCaptureQuality('document_front', measured.metrics);
+    if (quality.passed === false) { out.innerHTML = refusal(quality); return; }
+
+    out.innerHTML = `<div class="note note-info" style="margin-top:12px">Examining the document…</div>`;
+
+    const features = (await DB.fetchDocumentSecurityFeatures()).find((f) => f.doc_type === docType) ?? {};
+    const findings = await lib.docs.analyseDocument(canvas, { docType, features });
+
+    let portraitDescriptor = null;
+    if (findings.portraitCanvas) {
+      portraitDescriptor = await lib.face.faceDescriptor(findings.portraitCanvas);
+    }
+
+    WIZ.document = {
+      docType, findings, portraitDescriptor, metrics: measured.metrics, source, quality, features,
+    };
+
+    await DB.submitCapture({
+      sessionId: WIZ.sessionId, captureType: 'document_front', source,
+      metrics: measured.metrics, quality,
+    });
+    if (portraitDescriptor) {
+      await DB.submitCapture({
+        sessionId: WIZ.sessionId, captureType: 'document_portrait', source,
+        metrics: measured.metrics, quality,
+        descriptor: Array.from(portraitDescriptor.vector),
+      });
+    }
+
+    out.innerHTML = renderDocumentFindings(findings, features, portraitDescriptor)
+      + (features.mrz ? mrzPanel() : '')
+      + continueButton('wizToReconcile', 'Reconcile everything');
+
+    if (features.mrz) {
+      document.getElementById('wizMrzCheck').addEventListener('click', checkMrz);
+    }
+    document.getElementById('wizToReconcile').addEventListener('click', () => gotoStep(3));
+  } catch (e) {
+    out.innerHTML = errorState(e);
+  }
+}
+
+function renderDocumentFindings(f, features, portraitDescriptor) {
+  const fired = f.signals.filter((s) => s.fired);
+  const s = f.substitution;
+
+  return `<div class="note ${fired.length ? 'note-warn' : 'note-info'}" style="margin-top:12px">
+      <b>${fired.length ? `${fired.length} finding${fired.length === 1 ? '' : 's'} to look at` : 'Nothing inconsistent found'}.</b>
+      ${portraitDescriptor
+        ? ` The portrait was found and a descriptor computed from it${f.ghost ? ', and a second, smaller portrait was found too' : ''}.`
+        : ' No portrait was located, so there is nothing to compare the person against.'}
+    </div>
+
+    ${fired.length ? `<div style="margin-top:10px">${fired.map((sig) => `
+      <div class="note note-warn" style="margin-top:6px">
+        <b>${esc(titleCase(sig.code))}</b> <span class="mono muted">${esc(sig.value)}</span><br>
+        ${esc(sig.detail)}
+      </div>`).join('')}</div>` : ''}
+
+    ${s ? `<div class="card" style="margin-top:12px"><div class="card-hdr">
+        <div><div class="card-title">Portrait against the card it sits on</div>
+        <div class="card-sub">Every figure is the portrait compared with the rest of the document</div></div></div>
+      <div class="card-body" style="padding:0">
+        <table><thead><tr><th>Measure</th><th>Value</th><th>What it would mean</th></tr></thead><tbody>
+          <tr><td>Fine texture</td><td class="mono">${esc(s.noiseRatio)}×</td>
+            <td class="muted">One printing process leaves one texture. A ratio far from 1 means two.</td></tr>
+          <tr><td>Focus falloff</td><td class="mono">${esc(s.focusRatio)}×</td>
+            <td class="muted">A card lies in one focal plane; something stuck on top of it sits above that plane.</td></tr>
+          <tr><td>White point</td><td class="mono">${esc(s.colourDelta)}</td>
+            <td class="muted">Measured from the highlights, not the average — a face is warmer than a card whoever printed it.</td></tr>
+          <tr><td>Border ridge</td><td class="mono">${esc(s.boundaryRidge)} luma</td>
+            <td class="muted">A physical photograph casts a shadow along its edge, or catches light off tape. Printed ink does neither.</td></tr>
+          <tr><td>Compression</td><td class="mono">${esc(s.errorLevelRatio)}×</td>
+            <td class="muted">A region from another file falls differently when re-encoded.</td></tr>
+          <tr><td>Blown highlights</td><td class="mono">${esc(s.specular.blownPct)}%</td>
+            <td class="muted">Runs of white across the portrait are the signature of tape or gloss.</td></tr>
+          ${f.ghostCorrelation !== null ? `<tr><td>Ghost portrait</td>
+            <td class="mono">${esc(f.ghostCorrelation)}</td>
+            <td class="muted">The second, smaller portrait is printed from the same file. Replacing one and not the other breaks the pair.</td></tr>` : ''}
+        </tbody></table>
+      </div></div>` : ''}
+
+    <div class="note note-info" style="margin-top:10px;font-size:11px">
+      <b>What this cannot do.</b> There is no reference specimen here to compare against, no
+      ultraviolet or infrared channel, and no reading of the chip. These checks ask whether the
+      document is consistent with itself — which is what catches a substituted photograph, and is
+      not the same as confirming the document was issued.
+      ${features.notes ? `<br><b>${esc(titleCase(f.docType))}:</b> ${esc(features.notes)}` : ''}
+    </div>`;
+}
+
+function mrzPanel() {
+  return `<div class="card" style="margin-top:12px">
+    <div class="card-hdr"><div><div class="card-title">Machine-readable zone</div>
+      <div class="card-sub">The one check here that is as strong on a laptop as in a laboratory</div></div></div>
+    <div class="card-body">
+      <div class="note note-info" style="margin-top:0">Reading the characters off the image needs an
+      optical recogniser this environment does not have, so the band is located and you type what it
+      says. The check digits are then verified for real — they are arithmetic over the characters,
+      so they catch a document whose data has been altered since it was issued.</div>
+      <div class="field" style="margin-top:10px"><label for="wizMrz">The lines, as printed</label>
+        <textarea id="wizMrz" class="mono" rows="3" placeholder="IDZAF..."></textarea></div>
+      <button class="btn btn-sm" id="wizMrzCheck">Verify the check digits</button>
+      <div id="wizMrzResult"></div>
+    </div></div>`;
+}
+
+async function checkMrz() {
+  const out = document.getElementById('wizMrzResult');
+  const text = document.getElementById('wizMrz').value.trim();
+  if (!text) { toast('Type the lines first', 'err'); return; }
+  out.innerHTML = loading();
+  try {
+    const lib = await captureLib();
+    const parsed = await lib.docs.verifyMrz(text);
+    WIZ.mrz = parsed;
+    const f = parsed.fields ?? {};
+    out.innerHTML = `<div class="note ${parsed.valid ? 'note-info' : 'note-danger'}" style="margin-top:10px">
+      <b>${parsed.valid ? 'Every check digit holds.' : 'A check digit fails.'}</b>
+      ${parsed.valid
+        ? 'The data on the document agrees with itself.'
+        : 'The data on this document does not agree with itself. That is arithmetic, not inference.'}
+      <dl class="kv" style="margin-top:8px">
+        <dt>Format</dt><dd class="mono">${esc(parsed.format ?? '—')}</dd>
+        ${f.document_number ? `<dt>Document</dt><dd class="mono">${esc(f.document_number)}</dd>` : ''}
+        ${f.surname ? `<dt>Name</dt><dd>${esc([f.given_names, f.surname].filter(Boolean).join(' '))}</dd>` : ''}
+        ${f.date_of_birth ? `<dt>Born</dt><dd>${esc(f.date_of_birth)}</dd>` : ''}
+        ${f.date_of_expiry ? `<dt>Expires</dt><dd>${esc(f.date_of_expiry)}</dd>` : ''}
+        ${(parsed.reasonCodes ?? []).length
+          ? `<dt>Failures</dt><dd>${esc(parsed.reasonCodes.map(titleCase).join(', '))}</dd>` : ''}
+      </dl></div>`;
+  } catch (e) {
+    out.innerHTML = errorState(e);
+  }
+}
+
+// ── 4 · Reconciliation ──────────────────────────────────────────
+function renderReconcileStep(body, title, sub) {
+  stopStage();
+  title.textContent = 'Reconciliation';
+  sub.textContent = 'The person, the document, and what the authority holds';
+  body.innerHTML = loading();
+  reconcile(body);
+}
+
+async function reconcile(body) {
+  try {
+    const res = await DB.reconcileCapture({
+      sessionId: WIZ.sessionId,
+      selfieDescriptor: WIZ.selfie ? Array.from(WIZ.selfie.descriptor.vector) : null,
+      documentPortraitDescriptor: WIZ.document?.portraitDescriptor
+        ? Array.from(WIZ.document.portraitDescriptor.vector) : null,
+      documentType: WIZ.document?.docType ?? null,
+      documentFindings: WIZ.document ? {
+        firedCodes: WIZ.document.findings.firedCodes,
+        substitution: WIZ.document.findings.substitution,
+        ghostCorrelation: WIZ.document.findings.ghostCorrelation,
+      } : null,
+      mrz: WIZ.mrz,
+      depth: WIZ.depth,
+      idHash: WIZ.identity?.idHash ?? null,
+      last4: WIZ.identity?.last4 ?? null,
+      level: WIZ.level,
+    });
+    WIZ.reconciliation = res;
+
+    const c = res.comparisons ?? {};
+    body.innerHTML = `
+      ${comparisonCard('The person against their document', c.selfie_vs_document,
+        'Both images were captured in this session, so this comparison is made entirely from what you just took.')}
+      ${comparisonCard('The person against the authority record', c.selfie_vs_authority,
+        'Simulated. There is no Home Affairs here.')}
+      ${duplicateCard(c.duplicate_enrolment)}
+      ${documentCard(res.document)}
+      ${WIZ.depth ? `<div style="margin-top:12px">${renderDepth(WIZ.depth)}</div>` : `
+        <div class="note note-warn" style="margin-top:12px"><b>Presence was never established.</b>
+        No depth scan ran in this session, so nothing here distinguishes a person from a photograph
+        of one.</div>`}
+      ${continueButton('wizToAgents', 'Put it to the agents')}`;
+
+    document.getElementById('wizToAgents').addEventListener('click', () => {
+      gotoStep(4);
+      runAgents();
+    });
+  } catch (e) {
+    body.innerHTML = errorState(e);
+  }
+}
+
+function comparisonCard(heading, cmp, footnote) {
+  if (!cmp) {
+    return `<div class="note note-warn" style="margin-top:12px">
+      <b>${esc(heading)}</b><br>Not computed — one of the two images is missing.</div>`;
+  }
+  if (cmp.matched === null || cmp.matched === undefined) {
+    return `<div class="note note-warn" style="margin-top:12px">
+      <b>${esc(heading)}</b><br>${esc(cmp.note ?? 'No comparison was possible.')}</div>`;
+  }
+
+  const tone = cmp.matched ? (cmp.confidence >= 70 ? 'note-info' : 'note-warn') : 'note-danger';
+  return `<div class="note ${tone}" style="margin-top:12px">
+    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+      <b style="font-size:13px">${esc(heading)}</b>
+      <span class="badge b-${cmp.matched ? 'passed' : 'failed'}">${cmp.matched ? 'Match' : 'No match'}</span>
+      <span class="mono muted">${esc(cmp.confidence)}% confidence</span>
+      ${cmp.simulated ? '<span class="veto-tag">simulated</span>' : ''}
+    </div>
+    <div style="margin-top:6px">${esc(cmp.question ?? '')}</div>
+    <dl class="kv" style="margin-top:9px">
+      <dt>Model similarity</dt><dd class="mono">${esc(cmp.similarity)} against a ${esc(cmp.threshold)} threshold at FMR ${esc(cmp.operatingFmr)}</dd>
+      <dt>Measured appearance</dt><dd class="mono">${esc(cmp.measuredAppearance)}</dd>
+      <dt>Model</dt><dd class="mono">${esc(cmp.modelId)} · ${esc(cmp.provider)}</dd>
+      <dt>Evidence</dt><dd>${esc(cmp.evidence ?? '—')}</dd>
+    </dl>
+    <div style="margin-top:8px;font-size:11px;color:var(--ink3)">
+      ${esc(cmp.basis ?? '')} ${cmp.limit ? `<br><b>${esc(cmp.limit)}</b>` : ''}
+      ${footnote ? `<br>${esc(footnote)}` : ''}
+    </div>
+  </div>`;
+}
+
+function duplicateCard(dup) {
+  if (!dup) return '';
+  if (!dup.fired) {
+    // A check against nothing is not a check, and saying "not enrolled
+    // elsewhere" after comparing against an empty register would be
+    // the console reporting a reassurance it has not earned.
+    return dup.checked
+      ? `<div class="note note-info" style="margin-top:12px">
+          <b>This face is not enrolled under any other identity number.</b>
+          Compared against ${esc(dup.checked)} face(s) already enrolled here.</div>`
+      : `<div class="note note-warn" style="margin-top:12px">
+          <b>Nothing to compare against yet.</b> This is the first face enrolled in this register,
+          so the duplicate-identity check had no material to work with. It is not a finding.</div>`;
+  }
+  return `<div class="note note-danger" style="margin-top:12px">
+    <b>This face is already enrolled under a different identity number.</b><br>
+    Appearance ${esc(dup.appearance)} against the identity ending
+    <span class="mono">${esc(dup.otherLast4 ?? '····')}</span>. ${esc(dup.note)}</div>`;
+}
+
+function documentCard(doc) {
+  if (!doc) {
+    return `<div class="note note-warn" style="margin-top:12px">
+      <b>No document was examined in this session.</b></div>`;
+  }
+  const tone = doc.status === 'passed' ? 'note-info' : doc.status === 'failed' ? 'note-danger' : 'note-warn';
+  return `<div class="note ${tone}" style="margin-top:12px">
+    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+      <b style="font-size:13px">The document itself</b>
+      <span class="badge b-${doc.status === 'passed' ? 'passed' : doc.status === 'failed' ? 'failed' : 'review'}"
+        >${esc(titleCase(doc.status))}</span>
+      <span class="mono muted">${esc(doc.score)}/100</span>
+    </div>
+    ${doc.findings.length ? `<div style="margin-top:8px">
+      ${doc.findings.map((f) => `<div>· ${esc(f.name)}
+        <span class="mono muted">−${esc(f.weight)}</span>
+        ${f.severity === 'critical' ? '<span class="veto-tag">critical</span>' : ''}</div>`).join('')}
+    </div>` : '<div style="margin-top:8px">Nothing inconsistent was found between the portrait and the card it is printed on.</div>'}
+    ${doc.mrz ? `<div style="margin-top:8px">Machine-readable zone:
+      <b>${doc.mrz.valid ? 'every check digit holds' : 'a check digit fails'}</b>.</div>` : ''}
+  </div>`;
+}
+
+// ── 5 · The agents ──────────────────────────────────────────────
+function renderDecideStep(body, title, sub) {
+  stopStage();
+  title.textContent = 'Decision';
+  sub.textContent = 'What the agents concluded, and what you do with it';
+  body.innerHTML = `<div id="wizDecideBody">${loading()}</div>`;
+}
+
+const VERDICT_ICON = {
+  pass: '<path d="M4 10.5l4 4 8-9" stroke-linecap="round" stroke-linejoin="round"/>',
+  concern: '<path d="M10 4.5v7M10 14.2v.4" stroke-linecap="round"/><circle cx="10" cy="10" r="8"/>',
+  fail: '<path d="M6 6l8 8M14 6l-8 8" stroke-linecap="round"/>',
+  abstain: '<path d="M5 10h10" stroke-linecap="round"/><circle cx="10" cy="10" r="8"/>',
+};
+
+async function runAgents() {
+  const card = document.getElementById('agentCard');
+  const bodyEl = document.getElementById('agentBody');
+  const decide = document.getElementById('wizDecideBody');
+  card.style.display = '';
+  bodyEl.innerHTML = loading();
+
+  try {
+    const run = await DB.adjudicate({
+      sessionId: WIZ.sessionId,
+      evidence: {
+        identity: WIZ.identity,
+        consented: WIZ.consented,
+        document: WIZ.reconciliation?.document ?? null,
+        comparisons: WIZ.reconciliation?.comparisons ?? {},
+        depth: WIZ.depth,
+      },
+    });
+    WIZ.run = run;
+
+    const kind = run.recommendation === 'approve' ? 'note-info'
+      : run.recommendation === 'decline' ? 'note-danger' : 'note-warn';
+
+    bodyEl.innerHTML = `
+      <div class="note ${kind}">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <b style="font-size:14px">${esc(titleCase(run.recommendation))}</b>
+          <span class="badge b-${run.recommendation === 'approve' ? 'passed'
+            : run.recommendation === 'decline' ? 'failed' : 'review'}">${esc(run.confidence)}% confidence</span>
+          ${run.vetoedBy ? `<span class="veto-tag">vetoed by ${esc(run.vetoedBy.replace(/_/g, ' '))}</span>` : ''}
+        </div>
+        <div style="margin-top:7px">${esc(run.summary)}</div>
+        <div style="margin-top:7px;font-size:11px">
+          <b>This is a recommendation, not a decision.</b> A person applies it, and an override is
+          recorded against their account. Every agent below is a rule over the evidence — nothing
+          here is a language model, which is why the same file always produces the same answer.
+        </div>
+      </div>
+
+      <div style="margin-top:14px">
+        ${run.decisions.map((d) => `
+          <div class="agent">
+            <div class="agent-icon agent-${esc(d.verdict)}">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor">${VERDICT_ICON[d.verdict] ?? ''}</svg>
+            </div>
+            <div style="min-width:0;flex:1">
+              <div class="agent-name">${esc(d.name)}
+                ${badge(d.verdict === 'pass' ? 'passed' : d.verdict === 'fail' ? 'failed'
+                  : d.verdict === 'concern' ? 'review' : 'skipped')}
+                ${d.canVeto ? '<span class="veto-tag">can veto</span>' : ''}
+                <span class="mono muted" style="margin-left:auto;font-size:10.5px">${esc(d.confidence)}%</span>
+              </div>
+              <div class="agent-remit">${esc(d.remit ?? '')}</div>
+              <div class="agent-rationale">${esc(d.rationale)}</div>
+            </div>
+          </div>`).join('')}
+      </div>`;
+
+    const cmp = WIZ.reconciliation?.comparisons?.selfie_vs_document;
+    decide.innerHTML = `
+      <dl class="kv">
+        <dt>Session</dt><dd class="mono">${esc(WIZ.sessionId)}</dd>
+        <dt>Applicant</dt><dd>${esc(WIZ.subject?.name ?? '—')}
+          <span class="mono muted">••• ${esc(WIZ.identity?.last4 ?? '····')}</span></dd>
+        <dt>Document match</dt><dd>${cmp
+          ? (cmp.matched ? `<span class="badge b-passed">Matched · ${esc(cmp.similarity)}</span>`
+             : '<span class="badge b-failed">No match</span>')
+          : '<span class="muted">Not run</span>'}</dd>
+        <dt>Presence</dt><dd>${WIZ.depth
+          ? (WIZ.depth.verdict === 'three_dimensional'
+              ? '<span class="badge b-passed">Depth confirmed</span>'
+              : WIZ.depth.verdict === 'flat'
+                ? '<span class="badge b-failed">Flat</span>'
+                : '<span class="badge b-review">Inconclusive</span>')
+          : '<span class="muted">Not scanned</span>'}</dd>
+        <dt>Document</dt><dd>${WIZ.reconciliation?.document
+          ? `${esc(titleCase(WIZ.reconciliation.document.status))}
+             <span class="mono muted">${esc(WIZ.reconciliation.document.score)}/100</span>`
+          : '<span class="muted">Not examined</span>'}</dd>
+        <dt>Recommendation</dt><dd><b>${esc(titleCase(run.recommendation))}</b></dd>
+      </dl>
+      <div style="display:flex;gap:7px;margin-top:14px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" id="wizAccept">Accept and onboard</button>
+        <button class="btn btn-sm" id="wizOverride">Override</button>
+      </div>
+      <div id="wizFinal"></div>`;
+
+    document.getElementById('wizAccept').addEventListener('click', () => applyDecision('accepted'));
+    document.getElementById('wizOverride').addEventListener('click', () => applyDecision('overridden'));
+  } catch (e) {
+    bodyEl.innerHTML = errorState(e);
+    if (decide) decide.innerHTML = '';
+  }
+}
+
+async function applyDecision(outcome) {
+  const out = document.getElementById('wizFinal');
+  let reason;
+  if (outcome === 'overridden') {
+    reason = prompt('The agents recommended '
+      + `"${WIZ.run.recommendation}". What are you deciding instead, and why?`);
+    if (!reason) return;
+  }
+
+  out.innerHTML = loading();
+  try {
+    await DB.applyAgentDecision(WIZ.run.runId, outcome, reason);
+
+    let customer = null;
+    const approving = outcome === 'accepted' && WIZ.run.recommendation === 'approve';
+    if (approving && WIZ.subject?.caseId) {
+      try {
+        customer = await DB.onboardCustomer({ caseId: WIZ.subject.caseId });
+      } catch (e) {
+        out.innerHTML = `<div class="note note-warn" style="margin-top:12px">
+          Decision recorded. The customer record was not created: ${esc(e.message)}</div>
+          <button class="btn btn-sm" style="margin-top:10px" id="wizRestart">Start another</button>`;
+        document.getElementById('wizRestart').addEventListener('click', () => go('onboard'));
+        return;
+      }
+    }
+
+    out.innerHTML = `<div class="note ${approving ? 'note-info' : 'note-warn'}" style="margin-top:12px">
+      <b>${outcome === 'accepted' ? 'Recommendation applied' : 'Overridden'}.</b>
+      ${customer ? `<br>Customer <span class="mono">${esc(customer.customerId)}</span> created.` : ''}
+      </div>
+      <button class="btn btn-sm" style="margin-top:10px" id="wizRestart">Start another</button>`;
+
+    document.getElementById('wizRestart').addEventListener('click', () => go('onboard'));
+    toast(outcome === 'accepted' ? 'Recommendation applied' : 'Decision overridden', 'ok');
+  } catch (e) {
+    out.innerHTML = errorState(e);
+  }
+}
+
+// ── The camera stage ────────────────────────────────────────────
+async function startStage(facing) {
   const stage = document.getElementById('stage');
   const actions = document.getElementById('stageActions');
   if (!stage) return;
 
+  stopStage();
   const lib = await captureLib();
-  if (!lib.cameraAvailable()) {
+  const ctx = cameraContext();
+
+  if (!ctx.ok || !lib.cameraAvailable()) {
+    stage.className = 'stage';
     stage.innerHTML = `<div class="stage-empty">
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor"><rect x="2" y="5" width="16" height="11" rx="2"/>
       <path d="M4 4l12 12" stroke-linecap="round"/></svg>
-      <div>No camera here. Use <b>Upload instead</b> — the capture is recorded as an upload, not a live capture.</div></div>`;
+      <div>${esc(ctx.advice ?? 'No camera is available here.')}<br>
+      Use <b>Upload</b> — the capture is recorded as an upload, not a live capture.</div></div>`;
     return;
   }
 
-  stage.className = `stage ${facingMode === 'user' ? 'mirrored' : ''}`;
+  WIZ.facing = facing;
+  stage.className = `stage ${facing === 'user' ? 'mirrored' : ''}`;
   stage.innerHTML = `<video id="stageVideo" autoplay playsinline muted></video>
-    <div class="stage-guide"></div>
+    ${facing === 'user' ? '<div class="stage-guide"></div>' : '<div class="stage-card-guide"></div>'}
     <div class="stage-badge"><span class="dot"></span>LIVE</div>`;
 
-  actions.innerHTML = `<button class="btn btn-sm" id="stageStop">Stop camera</button>`;
-  document.getElementById('stageStop').addEventListener('click', stopStage);
-
   try {
-    WIZ.stream = await lib.startCamera(document.getElementById('stageVideo'), { facingMode });
+    WIZ.stream = await lib.startCamera(document.getElementById('stageVideo'), { facingMode: facing });
     WIZ.cameraOn = true;
+    WIZ.cameras = await lib.listCameras();
     startMetricsLoop();
+
+    // A phone has two cameras and the wrong one is always the one that
+    // opens. A laptop has one, and a button that does nothing is worse
+    // than no button.
+    actions.innerHTML = `${WIZ.cameras.length > 1
+      ? '<button class="btn btn-sm" id="stageFlip">Switch camera</button>' : ''}
+      <button class="btn btn-sm" id="stageStop">Stop camera</button>`;
+    document.getElementById('stageStop').addEventListener('click', stopStage);
+    document.getElementById('stageFlip')?.addEventListener('click',
+      () => startStage(WIZ.facing === 'user' ? 'environment' : 'user'));
   } catch (e) {
     stage.innerHTML = `<div class="stage-empty"><div>${esc(e.message)}</div></div>`;
-    document.getElementById('metrics').innerHTML = '';
+    const metrics = document.getElementById('metrics');
+    if (metrics) metrics.innerHTML = '';
   }
 }
 
@@ -2321,6 +3023,20 @@ function stopStage() {
   WIZ.cameraOn = false;
   const actions = document.getElementById('stageActions');
   if (actions) actions.innerHTML = '';
+}
+
+// Freezes the captured frame in the stage so the operator sees exactly
+// what was assessed, rather than a live view that has already moved on.
+function showFrozen(canvas) {
+  const stage = document.getElementById('stage');
+  if (!stage) return;
+  stopStage();
+  stage.className = 'stage';
+  stage.innerHTML = '';
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  canvas.style.objectFit = 'contain';
+  stage.appendChild(canvas);
 }
 
 // Measures the live frame a few times a second so the operator can fix
@@ -2348,189 +3064,22 @@ function renderMetrics(m, faces) {
   return metricTile('Sharpness', Math.round(m.sharpness), sharpState)
     + metricTile('Brightness', m.brightness, brightState, '%')
     + metricTile('Contrast', m.contrast, contrastState, '%')
-    + metricTile('Resolution', `${m.width}×${m.height}`,
-        m.width >= 640 ? 'ok' : 'warn')
-    + (faces
-        ? metricTile('Faces', faces.count, faces.count === 1 ? 'ok' : 'bad')
-        : '');
+    + metricTile('Resolution', `${m.width}×${m.height}`, m.width >= 640 ? 'ok' : 'warn')
+    + (faces ? metricTile('Faces', faces.count, faces.count === 1 ? 'ok' : 'bad') : '');
 }
 
-// ── Capture ─────────────────────────────────────────────────────
-async function doCapture(captureType) {
-  const video = document.getElementById('stageVideo');
-  if (!video || !WIZ.cameraOn) { toast('Start the camera first', 'err'); return; }
-  const lib = await captureLib();
-  await handleCapture(captureType, await lib.captureAndMeasure(video, { captureType }), 'live_camera', video);
+function refusal(quality) {
+  return `<div class="note note-danger" style="margin-top:12px">
+    <b>Capture refused — score ${esc(quality.score)}.</b><br>
+    ${esc((quality.reason_codes ?? []).map(titleCase).join(' · '))}
+    <div style="margin-top:6px"><b>${esc(remedyText(quality.reason_codes ?? []))}</b></div>
+    <div style="margin-top:6px;font-size:11px">Nothing was templated or compared. Most failed matches
+    are failed photographs, and telling you "no match" when the real answer is "too dark" would send
+    you after the wrong problem.</div></div>`;
 }
 
-async function doUpload(captureType, file) {
-  const lib = await captureLib();
-  const canvas = await lib.fileToCanvas(file);
-  await handleCapture(captureType, await lib.captureAndMeasure(canvas, { captureType }), 'upload', null);
-}
-
-async function handleCapture(captureType, measured, source, videoEl) {
-  const resultEl = document.getElementById(
-    captureType === 'selfie' ? 'wizSelfieResult' : 'wizDocResult');
-  const noteEl = document.getElementById('captureNote');
-  const lib = await captureLib();
-
-  document.getElementById('metrics').innerHTML =
-    renderMetrics(measured.metrics, measured.faces);
-
-  // Freeze the frame so the operator sees exactly what was assessed.
-  const stage = document.getElementById('stage');
-  if (stage) {
-    const shot = measured.canvas;
-    stage.innerHTML = '';
-    shot.style.width = '100%'; shot.style.height = '100%'; shot.style.objectFit = 'cover';
-    stage.appendChild(shot);
-  }
-
-  // The same rules the pipeline uses, checked before anything is sent.
-  let quality;
-  try {
-    quality = await DB.checkCaptureQuality(captureType, measured.metrics);
-  } catch (e) { resultEl.innerHTML = errorState(e); return; }
-
-  const advisories = quality.advisories ?? [];
-  const advisoryNote = advisories.length
-    ? `<div style="margin-top:7px;font-size:11px;color:var(--ink3)">
-        Confidence lowered: ${esc(advisories.map(titleCase).join(' · '))}. Not a fault in the
-        photograph — this browser could not measure it.</div>`
-    : '';
-
-  if (quality.passed === false) {
-    noteEl.innerHTML = '';
-    resultEl.innerHTML = `<div class="note note-danger" style="margin-top:12px">
-      <b>Capture refused — score ${esc(quality.score)}.</b><br>
-      ${esc((quality.reason_codes ?? []).map(titleCase).join(' · '))}
-      <div style="margin-top:6px"><b>${esc(remedyText(quality.reason_codes ?? []))}</b></div>
-      ${advisoryNote}
-      </div>`;
-    setTimeout(() => startStage(captureType === 'selfie' ? 'user' : 'environment'), 1800);
-    return;
-  }
-
-  resultEl.innerHTML = loading();
-
-  // Liveness runs on the live stream, before the match, and only where
-  // there is a stream to run it on.
-  let clientLiveness = null;
-  if (captureType === 'selfie' && videoEl && WIZ.cameraOn) {
-    noteEl.innerHTML = `<div class="note note-info">Checking for presentation attack…</div>`;
-    clientLiveness = await lib.passiveLiveness(videoEl);
-    noteEl.innerHTML = clientLiveness.available
-      ? `<div class="note ${clientLiveness.looksStatic ? 'note-danger' : 'note-info'}">
-          <b>Motion ${clientLiveness.motion}</b> — ${esc(clientLiveness.note)}</div>`
-      : '';
-  }
-
-  try {
-    const blob = await lib.canvasToBlob(measured.canvas, 'image/jpeg', 0.9);
-    const imageBase64 = await new Promise((resolve) => {
-      const r = new FileReader();
-      r.onload = () => resolve(r.result);
-      r.readAsDataURL(blob);
-    });
-
-    // A document scan carries the portrait the selfie is matched to, so
-    // it is sent twice: once as the scan, once as the cropped face.
-    const res = await DB.submitCapture({
-      sessionId: WIZ.sessionId, captureType, source, imageBase64,
-      metrics: measured.metrics, liveness: clientLiveness,
-    });
-
-    WIZ.captures[captureType] = res;
-
-    if (captureType === 'document_front' && measured.faces?.largest) {
-      const portrait = lib.cropFace(measured.canvas, measured.faces.largest);
-      const pMeasured = await lib.captureAndMeasure(portrait, { captureType: 'document_portrait' });
-      const pBlob = await lib.canvasToBlob(portrait, 'image/jpeg', 0.92);
-      const pB64 = await new Promise((resolve) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.readAsDataURL(pBlob);
-      });
-      const pRes = await DB.submitCapture({
-        sessionId: WIZ.sessionId, captureType: 'document_portrait', source,
-        imageBase64: pB64, metrics: pMeasured.metrics,
-      });
-      WIZ.captures.document_portrait = pRes;
-    }
-
-    if (captureType === 'document_front') {
-      const enrolled = !!WIZ.captures.document_portrait?.template;
-      resultEl.innerHTML = `<div class="note ${enrolled ? 'note-info' : 'note-warn'}" style="margin-top:12px">
-        <b>Document accepted — quality ${esc(quality.score)}.</b><br>
-        ${advisoryNote}
-        ${enrolled
-          ? 'The portrait was found and enrolled as the reference for the live photograph.'
-          : measured.faces === null
-            ? 'No face detector in this browser, so the portrait could not be cropped automatically. '
-              + 'The live photograph will have nothing to match against.'
-            : 'No portrait was found on this document. The live photograph will have nothing to match against.'}
-        </div>
-        <button class="btn btn-primary btn-sm" style="margin-top:10px" id="wizNextSelfie">Continue to the photograph</button>`;
-      document.getElementById('wizNextSelfie').addEventListener('click', () => {
-        WIZ.step = 2; renderWizStep();
-      });
-      return;
-    }
-
-    // Selfie
-    if (res.accepted === false && res.liveness) {
-      resultEl.innerHTML = `<div class="note note-danger" style="margin-top:12px">
-        <b>Presentation attack detected — ${esc(titleCase(res.liveness.attackType ?? 'unknown'))}.</b><br>
-        ${esc(res.liveness.note ?? '')}
-        </div>
-        <button class="btn btn-sm" style="margin-top:10px" id="wizRetrySelfie">Retake</button>
-        <button class="btn btn-primary btn-sm" style="margin-top:10px" id="wizPushOn">Continue to the agents</button>`;
-      document.getElementById('wizRetrySelfie').addEventListener('click',
-        () => { WIZ.step = 2; renderWizStep(); });
-      document.getElementById('wizPushOn').addEventListener('click',
-        () => { WIZ.step = 3; renderWizStep(); });
-      return;
-    }
-
-    WIZ.match = res.match;
-    WIZ.liveness = res.liveness;
-
-    resultEl.innerHTML = renderMatch(res)
-      + `<button class="btn btn-primary btn-sm" style="margin-top:10px" id="wizNextFinger">Continue</button>`;
-    document.getElementById('wizNextFinger').addEventListener('click', () => {
-      WIZ.step = 3; renderWizStep();
-    });
-  } catch (e) {
-    resultEl.innerHTML = errorState(e);
-  }
-}
-
-function renderMatch(res) {
-  if (!res.match) {
-    return `<div class="note note-warn" style="margin-top:12px">
-      <b>Capture accepted, but nothing to match against.</b><br>
-      ${esc(res.note ?? 'No document portrait has been enrolled.')}</div>`;
-  }
-  const m = res.match;
-  const kind = m.matched ? (m.confidence >= 80 ? 'note-info' : 'note-warn') : 'note-danger';
-  return `<div class="note ${kind}" style="margin-top:12px">
-    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
-      <b style="font-size:13px">${m.matched ? 'Faces match' : 'No match'}</b>
-      <span class="badge b-${m.matched ? 'passed' : 'failed'}">${esc(m.confidence)}% confidence</span>
-    </div>
-    <dl class="kv" style="margin-top:9px">
-      <dt>Similarity</dt><dd class="mono">${esc(m.similarity)}</dd>
-      <dt>Threshold</dt><dd class="mono">${esc(m.threshold)} at FMR ${esc(m.operatingFmr)}</dd>
-      <dt>Liveness</dt><dd>${res.liveness?.passed
-        ? `<span class="badge b-passed">Live subject</span>` : '<span class="muted">—</span>'}</dd>
-      <dt>Capture quality</dt><dd class="mono">${esc(res.quality?.score ?? '—')}</dd>
-    </dl>
-    <div style="margin-top:8px;font-size:11px;color:var(--ink3)">
-      The threshold is the model's calibrated cut-off at the operating false-match rate, not an
-      arbitrary percentage. Confidence is the margin past it, so a borderline pass reads as one.
-    </div>
-  </div>`;
+function continueButton(id, label) {
+  return `<button class="btn btn-primary btn-sm" style="margin-top:12px" id="${id}">${esc(label)}</button>`;
 }
 
 function remedyText(codes) {
@@ -2543,154 +3092,4 @@ function remedyText(codes) {
   if (codes.includes('resolution_too_low')) return 'Move closer, or use a better camera.';
   if (codes.includes('low_contrast')) return 'Photograph the document itself, not a screen showing it.';
   return 'Retake the capture.';
-}
-
-// ── Fingerprint ─────────────────────────────────────────────────
-async function doFingerprint() {
-  const out = document.getElementById('wizFingerResult');
-  out.innerHTML = loading();
-  try {
-    const lib = await captureLib();
-    const fp = await lib.captureFingerprint({ subjectLabel: WIZ.subject?.name ?? 'Applicant' });
-    WIZ.fingerprint = fp;
-
-    await DB.submitCapture({
-      sessionId: WIZ.sessionId, captureType: 'fingerprint', fingerprint: fp,
-    });
-
-    out.innerHTML = `<div class="note note-info" style="margin-top:12px">
-      <b>Device verified its owner.</b><br>${esc(fp.note)}</div>
-      <button class="btn btn-primary btn-sm" style="margin-top:10px" id="wizToAgents">Run the agents</button>`;
-    document.getElementById('wizToAgents').addEventListener('click', () => {
-      WIZ.step = 4; renderWizStep(); runAgents();
-    });
-  } catch (e) {
-    out.innerHTML = `<div class="note note-warn" style="margin-top:12px">${esc(e.message)}</div>
-      <button class="btn btn-primary btn-sm" style="margin-top:10px" id="wizSkipToAgents">Continue without it</button>`;
-    document.getElementById('wizSkipToAgents').addEventListener('click', () => {
-      WIZ.step = 4; renderWizStep(); runAgents();
-    });
-  }
-}
-
-// ── Agents ──────────────────────────────────────────────────────
-const VERDICT_ICON = {
-  pass: '<path d="M4 10.5l4 4 8-9" stroke-linecap="round" stroke-linejoin="round"/>',
-  concern: '<path d="M10 4.5v7M10 14.2v.4" stroke-linecap="round"/><circle cx="10" cy="10" r="8"/>',
-  fail: '<path d="M6 6l8 8M14 6l-8 8" stroke-linecap="round"/>',
-  abstain: '<path d="M5 10h10" stroke-linecap="round"/><circle cx="10" cy="10" r="8"/>',
-};
-
-async function runAgents() {
-  const card = document.getElementById('agentCard');
-  const body = document.getElementById('agentBody');
-  const decide = document.getElementById('wizDecideBody');
-  card.style.display = '';
-  body.innerHTML = loading();
-
-  try {
-    const run = await DB.adjudicate({ sessionId: WIZ.sessionId });
-    WIZ.run = run;
-
-    const kind = run.recommendation === 'approve' ? 'note-info'
-      : run.recommendation === 'decline' ? 'note-danger' : 'note-warn';
-
-    body.innerHTML = `
-      <div class="note ${kind}">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <b style="font-size:14px">${esc(titleCase(run.recommendation))}</b>
-          <span class="badge b-${run.recommendation === 'approve' ? 'passed'
-            : run.recommendation === 'decline' ? 'failed' : 'review'}">${esc(run.confidence)}% confidence</span>
-          ${run.vetoedBy ? `<span class="veto-tag">vetoed by ${esc(run.vetoedBy.replace(/_/g, ' '))}</span>` : ''}
-        </div>
-        <div style="margin-top:7px">${esc(run.summary)}</div>
-        <div style="margin-top:7px;font-size:11px">
-          <b>This is a recommendation, not a decision.</b> A person applies it, and an override is
-          recorded against their account.
-        </div>
-      </div>
-
-      <div style="margin-top:14px">
-        ${run.decisions.map((d) => `
-          <div class="agent">
-            <div class="agent-icon agent-${esc(d.verdict)}">
-              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor">${VERDICT_ICON[d.verdict] ?? ''}</svg>
-            </div>
-            <div style="min-width:0;flex:1">
-              <div class="agent-name">${esc(d.agent)}
-                ${badge(d.verdict === 'pass' ? 'passed' : d.verdict === 'fail' ? 'failed'
-                  : d.verdict === 'concern' ? 'review' : 'skipped')}
-                ${d.canVeto ? '<span class="veto-tag">can veto</span>' : ''}
-                <span class="mono muted" style="margin-left:auto;font-size:10.5px">${esc(d.confidence)}%</span>
-              </div>
-              <div class="agent-remit">${esc(d.remit ?? '')}</div>
-              <div class="agent-rationale">${esc(d.rationale)}</div>
-            </div>
-          </div>`).join('')}
-      </div>`;
-
-    decide.innerHTML = `
-      <dl class="kv">
-        <dt>Session</dt><dd class="mono">${esc(WIZ.sessionId)}</dd>
-        <dt>Applicant</dt><dd>${esc(WIZ.subject?.name ?? '—')}</dd>
-        <dt>Face match</dt><dd>${WIZ.match
-          ? (WIZ.match.matched ? `<span class="badge b-passed">Matched · ${esc(WIZ.match.confidence)}%</span>`
-             : '<span class="badge b-failed">No match</span>')
-          : '<span class="muted">Not run</span>'}</dd>
-        <dt>Fingerprint</dt><dd>${WIZ.fingerprint
-          ? '<span class="badge b-passed">Device verified</span>' : '<span class="muted">Skipped</span>'}</dd>
-        <dt>Recommendation</dt><dd><b>${esc(titleCase(run.recommendation))}</b></dd>
-      </dl>
-      <div style="display:flex;gap:7px;margin-top:14px;flex-wrap:wrap">
-        <button class="btn btn-primary btn-sm" id="wizAccept">Accept and onboard</button>
-        <button class="btn btn-sm" id="wizOverride">Override</button>
-      </div>
-      <div id="wizFinal"></div>`;
-
-    document.getElementById('wizAccept').addEventListener('click', () => applyDecision('accepted'));
-    document.getElementById('wizOverride').addEventListener('click', () => applyDecision('overridden'));
-  } catch (e) {
-    body.innerHTML = errorState(e);
-    if (decide) decide.innerHTML = '';
-  }
-}
-
-async function applyDecision(outcome) {
-  const out = document.getElementById('wizFinal');
-  let reason;
-  if (outcome === 'overridden') {
-    reason = prompt('The agents recommended '
-      + `"${WIZ.run.recommendation}". What are you deciding instead, and why?`);
-    if (!reason) return;
-  }
-
-  out.innerHTML = loading();
-  try {
-    await DB.applyAgentDecision(WIZ.run.runId, outcome, reason);
-
-    let customer = null;
-    const approving = outcome === 'accepted' && WIZ.run.recommendation === 'approve';
-    if (approving && WIZ.subject?.caseId) {
-      try {
-        customer = await DB.onboardCustomer({ caseId: WIZ.subject.caseId });
-      } catch (e) {
-        out.innerHTML = `<div class="note note-warn" style="margin-top:12px">
-          Decision recorded, but the customer was not created: ${esc(e.message)}</div>`;
-        return;
-      }
-    }
-
-    out.innerHTML = `<div class="note ${approving ? 'note-info' : 'note-warn'}" style="margin-top:12px">
-      <b>${outcome === 'accepted' ? 'Recommendation applied' : 'Overridden'}.</b>
-      ${customer ? `<br>Customer <span class="mono">${esc(customer.customerId)}</span> created.` : ''}
-      ${customer?.fraudScreen
-        ? `<br>Screened on creation — ${esc(customer.fraudScreen.signals ?? 0)} signal(s).` : ''}
-      </div>
-      <button class="btn btn-sm" style="margin-top:10px" id="wizRestart">Start another</button>`;
-
-    document.getElementById('wizRestart').addEventListener('click', () => go('onboard'));
-    toast(outcome === 'accepted' ? 'Recommendation applied' : 'Decision overridden', 'ok');
-  } catch (e) {
-    out.innerHTML = errorState(e);
-  }
 }

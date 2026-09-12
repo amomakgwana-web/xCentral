@@ -20,7 +20,9 @@ first two; the full history is on the branch `claude/tender-goodall-klf1yl`.
 |---|---|
 | `README.md` | What is real arithmetic and what needs a provider — read this first |
 | `supabase/migrations/` | The schema, in order. Most of the system's guarantees are here |
-| `src/capture.js` | Live camera, image-quality maths, liveness, WebAuthn |
+| `src/capture.js` | Live camera, image-quality maths, WebAuthn |
+| `src/vision/` | Depth from parallax, face appearance, document forensics — the arithmetic behind the live capture |
+| `src/localPipeline.js` | The verification pipeline as it runs with no services attached |
 | `supabase/functions/agent-adjudicate/index.ts` | The six agents and the orchestrator |
 
 ## Layout
@@ -30,8 +32,16 @@ index.html                     the console shell: markup + the design system
 src/
   supabaseClient.js            environment selection, publishable keys
   backend.js                   window.XC_DB — the only bridge to the database
-  console.js                   all 15 console pages
-  capture.js                   camera, sharpness/brightness/contrast, liveness, WebAuthn
+  console.js                   all 16 console pages, and the capture wizard
+  capture.js                   camera, sharpness/brightness/contrast, WebAuthn
+  localClient.js               a client shaped like the real one, over the generated records
+  localPipeline.js             identity, capture intake, reconciliation and the agents, in the page
+  vision/
+    image.js                   the pixel primitives everything else is built from
+    face.js                    locating a face, and how alike two of them look
+    depth.js                   parallax across a guided head movement: 3D from a flat camera
+    document.js                is the portrait printed on this card, or stuck to it
+  data/                        the generated dataset, and the arithmetic it is computed with
 
 supabase/migrations/           applied in filename order
   …0001_init_verification_core     profiles, RBAC, subjects, cases, check ledger
@@ -48,6 +58,9 @@ supabase/migrations/           applied in filename order
   …0012_credit_capacity_and_profile  how much credit can be given
   …0013_lifecycle_rbac_and_policies  permissions for the lifecycle domains
   …0014_capture_and_agents         capture sessions, quality gate, agents
+  …0015_wire_unevaluated_fraud_rules  three registered rules nothing ever evaluated
+  …0016_behaviour_credit_for_late_payment  a late payer is not a defaulter
+  …0017_document_forensics         what each document carries, and what a pasted portrait costs
 
 supabase/functions/
   _shared/                     http, hash, auth, cases, mrz, providers

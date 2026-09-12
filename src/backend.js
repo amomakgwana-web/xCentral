@@ -391,6 +391,12 @@ async function fetchArrearsBook() {
 const openCaptureSession  = (payload) => invoke('capture-intake', { action: 'open', ...payload });
 const abandonCaptureSession = (sessionId, reason) => invoke('capture-intake', { action: 'abandon', sessionId, reason });
 const submitCapture       = (payload) => invoke('capture-intake', payload);
+// Reconciliation is its own call rather than a side effect of the last
+// capture. The comparisons only become possible once BOTH the live
+// photograph and the document portrait exist, and folding that into
+// whichever capture happened to arrive second would make the order of
+// the wizard part of the logic.
+const reconcileCapture    = (payload) => invoke('capture-intake', { action: 'reconcile', ...payload });
 const adjudicate          = (payload) => invoke('agent-adjudicate', { action: 'adjudicate', ...payload });
 const applyAgentDecision  = (runId, outcome, reason) => invoke('agent-adjudicate', { action: 'decide', runId, outcome, reason });
 
@@ -417,6 +423,13 @@ const fetchAgentDecisions = (runId) => select('agent_decisions',
 
 const fetchQualityRules = () => select('capture_quality_rules',
   (q) => q.eq('active', true).order('capture_type'));
+
+// Which security features each document type is expected to carry, so
+// the forensics only run the checks that apply to the thing in front
+// of them. Failing a green ID book for having no machine-readable zone
+// would be the system inventing a defect.
+const fetchDocumentSecurityFeatures = () => select('document_security_features', (q) => q);
+const fetchDocumentForensicRules = () => select('document_forensic_rules', (q) => q);
 
 // Assesses capture quality against the same rules the pipeline uses,
 // so the wizard can tell an operator to retake before anything is sent.
@@ -507,6 +520,7 @@ window.XC_DB = {
   openCaptureSession,
   abandonCaptureSession,
   submitCapture,
+  reconcileCapture,
   adjudicate,
   applyAgentDecision,
   fetchCaptureSessions,
@@ -515,6 +529,8 @@ window.XC_DB = {
   fetchAgentRuns,
   fetchAgentDecisions,
   fetchQualityRules,
+  fetchDocumentSecurityFeatures,
+  fetchDocumentForensicRules,
   checkCaptureQuality,
 
   // Fraud

@@ -22,6 +22,7 @@ import {
 } from './data/compute.js';
 import { capture_quality_rules, fraud_rules } from './data/reference.js';
 import { NOW, iso, isoDate, tag } from './data/generate.js';
+import { createPipeline } from './localPipeline.js';
 
 class Unsupported extends Error {}
 
@@ -383,14 +384,41 @@ export function createLocalClient() {
       audit('api_key.issued', 'api_key', row.id, { scopes: row.scopes });
       return { ...row, key: 'xck_local_this_is_shown_once_only' };
     },
+
+    // ── Live capture ──────────────────────────────────────────
+    // In production each of these is an edge function. Here they run
+    // in the tab, over the same records, with the same division of
+    // labour: the page measures, the pipeline decides.
+    'verify-identity': (body) => pipeline.verifyIdentity(body),
+
+    'capture-intake': (body) => {
+      if (body.action === 'open') return pipeline.openSession(body);
+      if (body.action === 'reconcile') return pipeline.reconcile(body);
+      return pipeline.submitCapture(body);
+    },
+
+    'agent-adjudicate': (body) => {
+      if (body.action === 'decide') {
+        return pipeline.applyDecision({ runId: body.runId, outcome: body.outcome, reason: body.reason });
+      }
+      return pipeline.adjudicate(body);
+    },
   };
+
+  const pipeline = createPipeline({ tables: t, audit, getSession: () => session });
 
   // Everything the console can call that this environment cannot
   // honestly do — running a live bureau enquiry, templating a face,
   // parsing a document — says so rather than inventing a result.
+  // Live capture runs here for real: the identity arithmetic, the
+  // comparisons, the document forensics and the agents are all
+  // computed, not invented. What remains on this list is the work that
+  // genuinely needs a provider — a bureau enquiry, a registry lookup —
+  // and it still says so rather than returning a number nobody could
+  // stand behind.
   const NOT_LOCAL = [
-    'verify-identity', 'verify-document', 'verify-credit', 'verify-biometric',
-    'capture-intake', 'agent-adjudicate', 'customer-onboard', 'vet-background',
+    'verify-document', 'verify-credit', 'verify-biometric',
+    'customer-onboard', 'vet-background',
     'assess-credit-capacity', 'manage-contract',
   ];
 

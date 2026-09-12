@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "npm run test:mrz && npm run test:dataset && npm run test:capture && npm run test:db",
+    "test": "npm run test:mrz && npm run test:dataset && npm run test:capture && npm run test:vision && npm run test:db",
     "test:mrz": "node --experimental-strip-types supabase/functions/_shared/mrz.test.ts",
     "test:dataset": "node tests/run-dataset.mjs",
     "test:db": "./scripts/test-db.sh",
@@ -15,7 +15,11 @@
     "test:wizard": "npm run build && node tests/run-onboarding-wizard.mjs",
     "test:console": "npm run build && node tests/run-console-pages.mjs",
     "build:single": "vite build --config vite.config.singlefile.js && node scripts/build-single-file.mjs",
-    "test:single": "npm run build:single && node tests/run-single-file.mjs"
+    "test:single": "npm run build:single && node tests/run-single-file.mjs",
+    "build:vision": "vite build --config vite.config.vision.js",
+    "test:vision": "npm run build:vision && node tests/run-vision.mjs",
+    "dev:lan": "node scripts/dev-lan.mjs",
+    "test:browser": "npm run build && node tests/run-console-pages.mjs && node tests/run-onboarding-wizard.mjs && npm run test:vision && npm run test:single"
   },
   "devDependencies": {
     "pg": "^8.23.0",
