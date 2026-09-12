@@ -1,2 +1,615 @@
-# xCentral
-Central Control Hub
+# xCentral — Verification Hub
+
+Central Control Hub for identity, document, credit and biometric verification.
+
+The other platforms in this family — BipraPay, xPayments, veriBills, PiggyBag,
+mySMME — do not each implement KYC. They hold an API key, call xCentral, and get
+back a decision. One consent register, one audit trail, one place where an
+identity number is handled, and one definition of what "standard assurance"
+means.
+
+Built on the same stack as its siblings: Vite + vanilla JS console, Supabase
+(Postgres with row level security, Deno edge functions), deployed on Vercel.
+The design tokens and class names in `index.html` are BipraPay's, so the two
+consoles read as one product family.
+
+---
+
+## What is real, and what needs a provider
+
+This distinction is the most important thing in the repository, so it is stated
+plainly rather than buried.
+
+**Decided here, by arithmetic we own.** These are correct, tested, and no
+provider can disagree with them:
+
+| Check | Where | Tests |
+|---|---|---|
+| SA ID check digit, date of birth, gender, citizenship | `validate_sa_id()` | `supabase/tests/logic_tests.sql` |
+| ICAO 9303 MRZ parsing and every check digit (TD1, TD3) | `_shared/mrz.ts` | `_shared/mrz.test.ts` |
+| Name matching, order- and accent-insensitive | `name_match_score()` | `logic_tests.sql` |
+| NCA Regulation 23A minimum expenses and affordability | `assess_affordability()` | `logic_tests.sql` |
+| Template comparison (cosine similarity), 1:N sweep | `cosine_similarity()`, `biometric_identify()` | `logic_tests.sql` |
+| Document expiry and staleness | `verify-document` | — |
+| Composite case scoring and status | `case_score()` | `logic_tests.sql` |
+| Consent enforcement | database triggers | `logic_tests.sql` |
+| Amortisation, schedules, balloon payments | `instalment_cents()` | `lifecycle_tests.sql` |
+| Payment allocation, arrears, reversals | `allocate_payment()` | `lifecycle_tests.sql` |
+| Payment behaviour scoring | `payment_behaviour()` | `lifecycle_tests.sql` |
+| Payslip arithmetic | `check_payslip_arithmetic()` | `lifecycle_tests.sql` |
+| Address and phone normalisation | `address_fingerprint()`, `normalise_msisdn()` | `lifecycle_tests.sql` |
+| Fraud rules and linkage detection | `run_fraud_screen()` | `lifecycle_tests.sql` |
+| Credit capacity and lending limits | `assess_credit_capacity()` | `lifecycle_tests.sql` |
+| Image quality — sharpness, brightness, contrast | `src/capture.js` | `tests/capture-metrics.html` |
+| Capture quality gate and remedies | `assess_capture_quality()` | `capture_tests.sql` |
+| Capture session state machine | `complete_capture_step()` | `capture_tests.sql` |
+| Depth from parallax, and the flat-object fit | `src/vision/depth.js` | `run-vision.mjs` |
+| Face appearance similarity | `src/vision/face.js` | `run-vision.mjs` |
+| Portrait substitution forensics | `src/vision/document.js` | `run-vision.mjs` |
+| Document forensic scoring | `score_document_forensics()`, `localPipeline.js` | `capture_tests.sql` |
+
+**Requires an authority we do not have offline.** These run through the
+provider adapters in `_shared/providers.ts`:
+
+| Check | Real provider would be |
+|---|---|
+| Does Home Affairs hold this record | DHA / HANIS |
+| Is this SIM registered to them, and when was it last swapped | Network / RICA aggregator |
+| Does this employer exist | CIPC |
+| Is this bank account theirs | Account verification service |
+| Is this vehicle clear of another financier's interest | NaTIS |
+| Face templating and matching | An ISO/IEC 30107-3 certified biometric SDK |
+| Fingerprint capture beyond the device's own sensor | A scanner SDK |
+| Is the document image genuine (tamper, security features) | A document-authentication vendor |
+| Credit bureau enquiry | TransUnion, Experian, XDS, VeriCred |
+| Face templating and liveness (PAD) | An ISO/IEC 30107-3 certified SDK |
+
+A `simulation` adapter ships so the sandbox, the console and the tests all work
+end to end. It is deterministic — the same input always gives the same answer —
+and it is **fenced**:
+
+- every simulated result is stamped `provider = 'simulation'` in
+  `verification_checks`, visibly and permanently;
+- `assertLiveProvider()` **refuses** to run the simulation against a production
+  platform unless `XCENTRAL_ALLOW_SIMULATION_IN_PROD=true` is explicitly set. It
+  throws rather than quietly returning a plausible number.
+
+The one genuinely dangerous failure mode for a verification system is a
+fabricated result being mistaken for a real one. The fence exists for that.
+
+I am not certain the NCA Regulation 23A figures in
+`20260904000004_credit_verification.sql` are the currently gazetted ones —
+they are the 2015 table as published. They are held as **versioned rows**
+precisely so this is a data correction rather than a code change, and past
+assessments stay reproducible against the version in force when they were made.
+
+---
+
+## Design commitments
+
+**The identity number is never stored.** Only a peppered SHA-256 hash, the last
+four digits, and the attributes the number encodes. `ID_HASH_PEPPER` is a
+function secret and is never in the database, so a dump of the tables does not
+yield the numbers. Without a pepper a 13-digit ID number is reversible by brute
+force in minutes, so `hashIdNumber()` **throws** rather than fall back to an
+unpeppered hash that would look identical in the table. Same principle as
+BipraPay's card vault.
+
+**Biometric templates are unreadable by the application.**
+`biometric_templates` has row level security enabled and *no policies at all* —
+every client role gets zero rows, always. Only the service role, i.e. the edge
+functions, can read a template, and they only ever return a score. No raw
+sample is stored anywhere.
+
+**Consent is a database precondition, not a checkbox.** Triggers on
+`credit_checks` and `biometric_templates` reject the write outright when no live
+consent covers it. "We processed biometrics without consent" is a constraint
+violation, not a bug a careless edge function can introduce. POPIA s26 marking
+is automatic; s27 will not accept legitimate interest for biometrics.
+
+**Liveness is evaluated before the match, and a failure stops there.** Matching
+a photograph of a photograph against a template succeeds — the template does not
+know nobody was present. When liveness fails, no similarity is computed and none
+is returned.
+
+**Documents are unreachable by URL.** The bucket is private with no client
+policy. Access goes through `document-access`, which checks the permission,
+demands a written reason, logs it, and mints a signed URL lasting at most five
+minutes.
+
+**The audit log cannot be rewritten.** Select policy only, no insert/update/
+delete for any client role.
+
+**Retention is executed, not merely declared.** `retention-purge` deletes
+document objects, deactivates templates past retention *or* whose consent
+lapsed, and expires cases. It supports `dryRun` (the default) so the first run
+against real data can be inspected.
+
+---
+
+## Customer lifecycle
+
+Verification establishes who someone is. The lifecycle domains are what a
+lender or dealership does next, and they share the same schema, audit trail and
+consent register.
+
+**Customers.** A subject is someone the hub verified; a *customer* is that
+subject in an ongoing relationship with one platform. The same person can be a
+customer of the dealership and the lender without either seeing the other's
+relationship — identity is shared, commercial history is not. A customer cannot
+be created from an unverified case.
+
+**Assets and agreements.** Vehicles by VIN, handsets by IMEI, equipment by
+serial. A partial unique index refuses two live agreements against one physical
+unit, because financing the same car twice is one of the oldest frauds there is.
+Instalments, schedules and total cost of credit come from `instalment_cents()`
+and `generate_payment_schedule()` in Postgres, so what the customer is told they
+owe and what the system chases are the same numbers.
+
+**Payments.** xCentral does not collect money — BipraPay and xPayments do, and
+post each collection here. What this schema owns is the comparison: what was
+due, what arrived, and what the gap says. A debit order that presents and
+bounces is recorded as a *reversal*, not as a payment that never happened,
+because the money not being there on the day is the signal that matters.
+Allocation is oldest-instalment-first, so "three months in arrears" means one
+thing consistently.
+
+**Background vetting.** Addresses normalise to a canonical fingerprint, which is
+what makes "one address serving nine unrelated applicants" a query. Phones carry
+RICA registration and, more importantly, **SIM-swap recency** — control of the
+number is what one-time passwords rest on, and a swap days before an application
+is a takeover pattern. Employment checks the employer at CIPC and does the
+payslip arithmetic: a forger who edits the gross rarely recomputes the
+deductions.
+
+**Credit capacity.** `assess_credit_capacity()` answers "how much can this
+person be given" from four inputs, and the weakest governs. Affordability is a
+**ceiling, not an average** — no score creates money that is not there, and
+lending past it is reckless credit under NCA s80. A bureau score describes how
+they paid everyone else; payment behaviour here describes how they paid *us*,
+and can substitute for a thin file up to the policy's uplift. An open critical
+fraud signal stops the assessment entirely rather than producing a number from
+data that may be fabricated.
+
+**Fraud.** Most application fraud is not clever: the same document under two
+names, a shared address or bank account, a payslip that does not reconcile, a
+recent SIM swap, a car already financed. Every rule is a query over data the hub
+holds, stored as a row with its threshold and weight, and every signal carries
+the evidence. A critical signal raises an alert for a person — it does not
+auto-decline, because a shared address is a block of flats as often as a
+syndicate. Confirming fraud writes the identifiers to a register so the same
+entity is caught on sight next time.
+
+## Live capture and onboarding
+
+The counter flow, in the order it actually happens: the identity number
+first, then the person, then their document, then everything reconciled
+against everything else.
+
+It runs on a laptop and on a phone. **The camera needs a secure context** —
+that is a browser rule, not a setting. `localhost` counts as secure, a plain
+`http://192.168.x.x` does not, so for a phone on the same network:
+
+```bash
+npm run dev:lan      # mints a self-signed certificate, serves HTTPS, prints the address
+```
+
+Accept the certificate warning once. Without HTTPS the console says so in
+plain words, offers upload instead, and records that the capture was uploaded
+rather than taken — because an uploaded photograph proves that a file exists,
+not that a person was there.
+
+### 1 · The identity number
+
+Checked arithmetically as it is typed: the check digit, the date of birth it
+encodes, the citizenship digit. The number is hashed with a pepper and
+discarded; what is kept is the hash and the last four digits.
+
+### 2 · The live capture, and the depth scan
+
+Quality is measured from the pixels before anything is templated — sharpness
+as the variance of the Laplacian, brightness and contrast from luminance — and
+a capture below the bar is refused with a remedy an operator can act on. Most
+failed matches are failed photographs.
+
+Then the scan, which is the part that establishes a person was actually there.
+
+**What "3D" and "4D" mean here**, because they are marketing words everywhere
+else:
+
+- **3D** is depth, recovered from parallax. When the camera and subject move
+  relative to one another, every point of a *flat* object moves according to
+  one shared transform — a plane stays a plane. A head does not: the nose is
+  nearer the lens than the ears, so when it turns, the nose sweeps further
+  across the frame. The scan tracks a grid of patches through the movement,
+  fits the single best flat-object transform to how they moved, and measures
+  what is left over. Near zero left over means the subject was flat.
+- **4D** is that depth over time: the sequence of poses, the latency between
+  each prompt and the movement answering it, and the micro-motion of a face at
+  rest.
+
+**The prompts come in a random order per session.** That is what makes it a
+challenge rather than a recording — a video of an earlier scan cannot know
+this session will ask for left before closer.
+
+The decision uses one statistic, because the two halves only mean anything
+together: how much motion was left unexplained, multiplied by how badly the
+flat explanation fitted. On the synthetic scenes a real head scores about 2.7
+and a photograph of one about 0.41.
+
+Only the poses that **rotated** the head count. Parallax comes from turning,
+not from approaching: scaling a dome is almost exactly scaling a plane, so a
+"move closer" pose puts a photograph and a face on equal footing. It is still
+captured — it shows the subject answered a prompt — and left out of the
+arithmetic.
+
+**What it does not do.** It defeats a printed photograph, a screen and a
+pre-recorded video. It does not defeat a live puppeteering attack or a moulded
+3D mask, and the confidence is capped to say so. Certified presentation attack
+detection is ISO/IEC 30107-3 and belongs behind the provider interface.
+
+### 3 · The document, examined rather than read
+
+Photograph the card or upload a scan. What follows is not OCR — it is a
+comparison between the portrait and the card around it, because a portrait
+printed as part of a document and one stuck on top of one are physically
+different objects:
+
+| Measure | What it exploits |
+|---|---|
+| Noise floor | One print process, one paper, one sensor — one texture. Taken as a percentile, so it comes from each region's smooth majority rather than from whichever has more edges. |
+| Focus falloff | The ratio of fine detail to coarse detail. A card lies in one focal plane; something stuck above it does not. |
+| White point | From the *highlights* of each region, not the average — a face is warmer than a card whoever printed it. Two printers disagree about white. |
+| Border ridge | A physical photograph casts a shadow along its edge, or catches light off tape. Printed ink has nothing there to cast one. |
+| Error level | A region that arrived from another file has been through an encoder the rest of the image has not. |
+| Ghost portrait | Where the card carries a second, smaller copy of the same photograph, substituting one and not the other breaks the pair. The strongest check here. |
+
+Each is a weighted signal held as a row, not a verdict. A document that fails
+them is **referred**, never refused — every one of them has an innocent
+explanation, and only the machine-readable zone failing its check digits is
+decisive, because that is arithmetic rather than inference.
+
+The MRZ is **located, not read**: transcribing OCR-B needs a recogniser this
+environment does not have, so the band is found and the operator types what it
+says. The check digits are then verified for real.
+
+### 4 · Reconciliation
+
+Four questions, answered separately and shown separately:
+
+- **Is the person at the camera the person on this document?** Both images
+  were captured in this session, so this comparison is made entirely from what
+  was just taken.
+- **Is this the person the authority holds under this identity number?**
+  Simulated, and labelled so on every record. There is no Home Affairs here.
+  What the register does hold is real: the first time an identity number is
+  seen, the portrait on the document it arrived with is enrolled as that
+  identity's reference, and every later presentation is compared against it by
+  the same arithmetic. So it genuinely catches a second person presenting the
+  same number later — which is most of what the real query is for — and it
+  cannot catch a first presentation that was false from the start. That limit
+  is printed in the result rather than left to be inferred.
+- **Is this face already enrolled under a different identity number?** One
+  person holding two identities is the oldest syndicate pattern there is, and
+  it is findable only because every enrolled descriptor is kept in one place.
+- **Is the document itself consistent with itself?**
+
+### What the face comparison actually is
+
+**Not a trained face recogniser.** A face recogniser is a network trained on
+millions of labelled identities whose output is calibrated against a measured
+false-match rate. Nothing here is trained on anything.
+
+What is computed is **appearance similarity**: the cosine of a
+gradient-orientation descriptor and a layout thumbnail, both centred, over an
+illumination-normalised crop. Real arithmetic over real pixels, deterministic,
+and it separates "plainly the same photograph of a person" from "plainly a
+different person". It will not separate identical twins and a large pose or
+age difference will beat it.
+
+Two different faces are alike to begin with — they are both faces — so the
+useful range is narrow and sits well above zero. Measured against the
+synthetic pairs in the test suite: the same person photographed twice under
+different conditions lands around **0.84**, two different people around
+**0.51**. The thresholds sit at 0.72 and 0.62 with a wide referral band
+between them, and they are calibrated against synthetic faces and **no real
+ones**.
+
+The identity *verdict* is issued separately, by the face model behind the
+provider interface — in this environment the simulation model, whose
+similarity is a declared rescaling of the measurement above, written in
+`localPipeline.js` where anyone can read what it was computed from. Swapping in
+a real SDK replaces the verdict and keeps the measurement.
+
+### Fingerprints, honestly
+
+A browser cannot read a fingerprint scanner. WebAuthn asks the *device* to
+verify its owner with its own sensor; the template never leaves the secure
+element. That proves the enrolled owner of that device was present, not that a
+particular person's finger was. AFIS-grade capture needs a scanner SDK. The
+distinction is preserved in the schema, the API responses and the UI copy.
+
+## The agents
+
+Six agents plus an orchestrator. Each owns one question, forms its own verdict
+from the check data the pipeline produced, writes its rationale in plain words,
+and some can veto.
+
+| Agent | Question | Veto |
+|---|---|---|
+| Identity | Is the identity well-formed, real, alive, and not on a list? | yes |
+| Document | Is the document genuine, current, and does it belong to this person? | yes |
+| Biometric | Is the person at the camera the person on the document, and were they present? | yes |
+| Fraud | Does anything here link to a pattern we have seen before? | yes |
+| Affordability | Can this person carry what they are asking for, under the NCA? | no |
+| Compliance | Is there lawful basis for everything we have done? | yes |
+
+**These are deterministic reasoners, not language models.** Every shipped agent
+applies a stated policy to stored data, and the `reasoning` column records which
+kind each is — so a model-backed agent added later is a visible change, asserted
+by a test. That is deliberate: a lending decision has to be reproducible and
+explainable to the NCR, and "the model said so" is neither.
+
+The orchestrator **arbitrates rather than averages**. A veto is decisive;
+averaging a failed identity check against a good affordability score would
+produce a number that means nothing. Three or more abstentions is a *refer*, not
+an approval — six agents that mostly had nothing to read is a thin file.
+
+A recommendation is never applied automatically. A person accepts or overrides
+it, and the override is recorded against their account with a reason.
+
+## Layout
+
+```
+supabase/
+  migrations/     schema, RLS, and the arithmetic that must not drift
+  functions/
+    _shared/      http, hash, auth, cases, mrz, providers
+    verify-identity  verify-document  verify-credit  verify-biometric
+    customer-onboard vet-background   assess-credit-capacity
+    manage-contract  record-payment   run-fraud-screen
+    capture-intake   agent-adjudicate
+    platform-verify  the machine-to-machine endpoint siblings call
+    case-decision    record-consent   manage-api-key  document-access
+    webhook-dispatch retention-purge
+  tests/          harness.sql + logic_tests.sql
+  seed.sql        sandbox data, including the sibling platforms
+  seed_lifecycle.sql  customers, assets, agreements, payments, fraud fixtures
+  seed_demo.sql   the same shape of data, for a real database
+src/              supabaseClient.js, backend.js (window.XC_DB), console.js
+                  capture.js — camera, image quality, liveness, WebAuthn
+                  localClient.js — the in-memory client, shaped like the real one
+  data/           the generated dataset and the arithmetic behind it
+tests/            browser tests for the capture maths, the wizard, and
+                  every console page against a real seeded database
+index.html        the console
+```
+
+---
+
+## Running it
+
+```bash
+npm install
+npm run dev
+```
+
+That is the whole of it. The console runs on a dataset generated in the
+browser: about 127 000 records across every module, built in under a second,
+identical on every machine. No database, no keys, no network.
+
+### One file, for sending to someone
+
+```bash
+npm run build:single      # → xcentral-console.html
+```
+
+Everything travels inside that file — styles, script, icon and the whole
+dataset — as one classic script rather than a module graph, so it opens by
+double-clicking it. No server, no install, no network: a laptop with the wifi
+off renders every page, and the only thing that degrades is the typeface,
+which falls back to a system font.
+
+The served build is still the one to develop against; the flattened build
+loads the capture code up front instead of when the wizard is opened.
+
+When the Supabase project is stood up, point the console at it and the same
+build reads from Postgres instead:
+
+```bash
+VITE_SUPABASE_URL_SANDBOX=https://<project>.supabase.co
+VITE_SUPABASE_KEY_SANDBOX=sb_publishable_…
+```
+
+Both are publishable values and public by design — access control is row level
+security and the edge functions, not secrecy. The header says which source is
+answering, so there is never a question about what is on screen.
+
+Apply the schema:
+
+```bash
+supabase db push
+psql "$DATABASE_URL" -f supabase/seed.sql
+```
+
+### Seeding the project, when there is one
+
+The seeds under `supabase/` populate a real database with the same shape of
+data the console generates locally. They are not needed to run anything today:
+
+```bash
+DATABASE_URL="postgresql://postgres:…@db.<project>.supabase.co:5432/postgres" \
+  ./scripts/seed-demo.sh
+```
+
+They insert rather than upsert, so run them once against an empty schema and
+use `supabase db reset` to start over.
+
+Function secrets:
+
+| Secret | Purpose |
+|---|---|
+| `ID_HASH_PEPPER` | **Required.** Identity hashing refuses to run without it |
+| `WEBHOOK_DISPATCH_SECRET` | Authenticates the scheduled webhook dispatcher |
+| `RETENTION_PURGE_SECRET` | Authenticates the scheduled purge |
+| `XCENTRAL_PROVIDER_<DOMAIN>` | Provider per domain; defaults to `simulation` |
+| `XCENTRAL_ALLOW_SIMULATION_IN_PROD` | Only to deliberately drill against production |
+
+---
+
+## The dataset
+
+`src/data/` builds every table the console reads, in dependency order, when the
+page loads. At least two hundred records in every module that holds records:
+
+| | |
+|---|---|
+| People | 900 subjects, 220 staff, 240 employers |
+| Cases | ~1 500 across every status, with ~9 000 checks behind them |
+| Documents | ~3 400, examined, with forensics on every identity document |
+| Credit | ~800 bureau enquiries and ~4 000 tradelines under them |
+| Biometrics | ~2 200 templates, ~1 300 comparisons, 220 duplicate-enrolment flags |
+| Agreements | ~800 contracts, ~45 000 scheduled instalments, ~12 000 payments |
+| Capture | 230 sessions with their agent adjudications |
+| Fraud | ~1 500 signals, ~280 alerts, 220 register entries |
+| Platform | 220 API keys, ~800 calls, ~10 000 audit entries, 215 data subject requests |
+
+Two properties matter more than the volume.
+
+**It is deterministic.** One fixed seed drives every choice, so the same figures
+appear on every reload and on every machine. A number that moves when you
+refresh is a number nobody can check.
+
+**It is computed, not written down.** Instalments come from the amortisation
+formula, schedules from the reducing balance, arrears from comparing the
+schedule to what was paid, behaviour from that record, case scores from the
+checks that ran, fraud signals from the rules the engine runs, and lending
+limits from the weakest of affordability, bureau, behaviour and exposure.
+Change a record and the figures that depend on it move, because they were never
+written down in the first place.
+
+Configuration — bureaus, modalities, agents, fraud rules, retention policies —
+is deliberately its natural size. There are four credit bureaus in South Africa;
+padding that list to two hundred would make the page lie about what the system
+can reach.
+
+Everyone in it is invented.
+
+---
+
+## Tests
+
+```bash
+# Schema and the arithmetic — 170 assertions across three suites
+createdb xctest
+psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/harness.sql
+for f in supabase/migrations/*.sql; do psql -d xctest -v ON_ERROR_STOP=1 -f "$f"; done
+psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/logic_tests.sql
+psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/lifecycle_tests.sql
+psql -d xctest -v ON_ERROR_STOP=1 -f supabase/tests/capture_tests.sql
+
+# MRZ, against the ICAO 9303 specimen documents
+node --experimental-strip-types supabase/functions/_shared/mrz.test.ts
+
+# Image-quality maths, in a real browser against synthetic images
+node tests/run-capture-metrics.mjs
+
+# The whole capture wizard, driven by Chromium's synthetic camera
+npm run build && node tests/run-onboarding-wizard.mjs
+
+# The dataset: volume, referential integrity, and that the figures
+# were computed rather than written down
+npm run test:dataset
+
+# Every console page, rendered by the shipped bundle from the dataset
+# it ships with. No database.
+npm run test:console
+
+# The single file, opened over file:// with nothing serving it — and
+# asserted to fetch nothing over the network
+npm run test:single
+
+# The vision code against scenes whose answer is known by construction:
+# a textured ellipsoid under a real perspective projection against the
+# same render put through an affine warp, a genuine card against one
+# with a portrait pasted on, one face against another
+npm run test:vision
+
+# The whole capture wizard end to end against the real pipeline —
+# three journeys that have to end differently: the applicant's own
+# document, somebody else's, and the same face under a second identity
+# number
+npm run test:wizard
+```
+
+`harness.sql` recreates just enough of a Supabase project (`auth.users`,
+`storage.buckets`, the `anon`/`authenticated`/`service_role` roles) for the
+migrations to run against stock Postgres. It is not deployed.
+
+`tests/postgrest-shim.mjs` is kept for the day the project is stood up: a
+deliberately small stand-in for Supabase's REST layer, speaking exactly the
+subset of PostgREST `src/backend.js` uses and returning **501 for anything
+else** rather than guessing. It is not on the default path, because the console
+no longer needs a database to render.
+
+What the console test catches which nothing else does: the SQL suites prove the
+functions compute the right numbers and CI proves no table backing a page is
+empty, but neither proves the console can *render* what is in those tables. A
+null where `console.js` expects a string produces an error panel, and every
+other suite stays green.
+
+---
+
+## Calling the hub
+
+```http
+POST /functions/v1/platform-verify
+x-api-key: xc_live_…
+x-idempotency-key: onboard-MRC-APP-0022
+
+{
+  "idNumber": "9001015009086",
+  "firstNames": "Thabo", "surname": "Mokoena",
+  "level": "standard",
+  "purpose": "onboarding",
+  "clientReference": "MRC-APP-0022",
+  "consent": { "granted": true, "textId": "ct_identity_v1", "method": "click_wrap" }
+}
+```
+
+Returns a case id and a status. A case needing a person comes back as `review`;
+the platform is notified by webhook when it is decided rather than polling.
+Webhooks are signed over the timestamp **and** the body
+(`X-XCentral-Signature: v1=<hmac>`), so a captured delivery cannot be replayed
+indefinitely — receivers should reject a stale `X-XCentral-Timestamp`.
+
+Two things this endpoint will not do: run a check the key's scopes do not cover
+(it returns 403 naming the refused domains rather than silently skipping them),
+and process anything without a consent record attributing responsibility to the
+calling platform.
+
+### Assurance levels
+
+Defined as rows in `verification_requirements`, so the definition is something
+an auditor can read rather than logic buried in a function.
+
+- **basic** — ID structure, deceased register, watchlist screening
+- **standard** — the above plus authority lookup, document authenticity, expiry, name match
+- **enhanced** — the above plus face match and liveness; credit optional
+
+A required check that has not run holds the case at `in_progress` however high
+the average is. A failed required check rejects the case whatever the average
+is. The score never outvotes a definite result.
+
+---
+
+## Roles
+
+`super_admin`, `verification_officer`, `compliance_officer`, `credit_analyst`,
+`biometrics_officer`, `fraud_analyst`, `collections`, `dealer_admin`,
+`developer`, `support`, `read_only`. New staff default to
+`read_only` until a Super Admin assigns a real role.
+
+Permissions are checked by `has_permission()` — the same function the RLS
+policies use — so the console and the database cannot disagree about what a role
+allows.

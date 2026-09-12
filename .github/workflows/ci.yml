@@ -1,0 +1,235 @@
+name: CI
+
+# The two suites guard different things and are kept apart deliberately:
+# `schema` proves the arithmetic the hub decides for itself still holds
+# (SA ID check digits, NCA affordability, consent gates, case scoring),
+# and `app` proves the MRZ parser and the console bundle still build.
+#
+# Neither needs a Supabase project. The schema job runs the migrations
+# against a stock Postgres using supabase/tests/harness.sql, which
+# stands in for auth.users, storage.buckets and the anon/authenticated/
+# service_role roles.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  schema:
+    name: Schema and logic
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # The official image ships contrib, so pgcrypto and pg_trgm —
+        # both required by the migrations — are available.
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Postgres client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Confirm the required extensions are available
+        run: |
+          missing=$(psql -tAc "
+            select string_agg(want, ', ')
+            from unnest(array['pgcrypto','pg_trgm']) want
+            where want not in (select name from pg_available_extensions);")
+          if [ -n "$missing" ]; then
+            echo "::error::Missing Postgres extensions: $missing"
+            exit 1
+          fi
+
+      # scripts/test-db.sh applies harness.sql, then every migration in
+      # order, then the assertions. It sets pipefail, so a raised
+      # assertion propagates as a non-zero exit rather than being
+      # swallowed by the pipe that formats the output.
+      - name: Migrations and logic assertions
+        run: PGDATABASE=xctest ./scripts/test-db.sh
+
+      # The seeds are what the sandbox and every demo run on, so a seed
+      # that no longer applies is a broken change even when the
+      # migrations are fine. All three are loaded, in the order
+      # scripts/seed-demo.sh loads them, because each depends on the one
+      # before it.
+      - name: Seeds apply to a fresh database
+        run: |
+          dropdb --if-exists xcseed
+          createdb xcseed
+          psql -v ON_ERROR_STOP=1 -q -d xcseed -f supabase/tests/harness.sql
+          for f in supabase/migrations/*.sql; do
+            psql -v ON_ERROR_STOP=1 -q -d xcseed -f "$f"
+          done
+          for f in supabase/seed.sql supabase/seed_lifecycle.sql supabase/seed_demo.sql; do
+            echo "  $(basename "$f")"
+            psql -v ON_ERROR_STOP=1 -q -d xcseed -f "$f"
+          done
+
+      # A demo that opens on an empty page is not a demo. Each of these
+      # backs a console page, and a zero means that page has nothing on
+      # it — which is a regression whether or not anything errored.
+      - name: Every console page has data
+        run: |
+          empty=$(psql -tAc "
+            select string_agg(t, ', ')
+            from (
+              select 'verification_cases' t, count(*) n from public.verification_cases
+              union all select 'customers',   count(*) from public.customers
+              union all select 'contracts',   count(*) from public.contracts
+              union all select 'payments',    count(*) from public.payments
+              union all select 'documents',   count(*) from public.documents
+              union all select 'credit_checks', count(*) from public.credit_checks
+              union all select 'biometric_verifications', count(*) from public.biometric_verifications
+              union all select 'capture_sessions', count(*) from public.capture_sessions
+              union all select 'agent_runs',  count(*) from public.agent_runs
+              union all select 'fraud_alerts', count(*) from public.fraud_alerts
+              union all select 'consents',    count(*) from public.consents
+              union all select 'watchlist_hits', count(*) from public.watchlist_hits
+              union all select 'api_requests', count(*) from public.api_requests
+              union all select 'audit_log',   count(*) from public.audit_log
+              union all select 'dsar_requests', count(*) from public.dsar_requests
+              union all select 'credit_assessments', count(*) from public.credit_assessments
+            ) x where n = 0;" -d xcseed)
+          if [ -n "$empty" ]; then
+            echo "::error::Seeded but empty, so the console page is blank: $empty"
+            exit 1
+          fi
+
+      # A seeded case whose stored status disagrees with what
+      # case_score() computes means the scoring rules and the fixtures
+      # have drifted apart — which would make every demo misleading.
+      - name: Seeded cases agree with the scorer
+        run: |
+          drift=$(psql -tAc "
+            select count(*)
+            from public.verification_cases c
+            where c.score is distinct from (public.case_score(c.id)->>'score')::int;" -d xcseed)
+          if [ "$drift" != "0" ]; then
+            echo '::error::Seeded case scores no longer match case_score()'
+            psql -d xcseed -c "
+              select id, status, score,
+                     (public.case_score(id)->>'score')::int as recomputed
+              from public.verification_cases order by id;"
+            exit 1
+          fi
+
+  app:
+    name: Parser and bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --experimental-strip-types needs Node 22.6 or newer. The MRZ
+      # parser is plain TypeScript with no Deno APIs, so it runs
+      # unmodified here and in the edge runtime.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # ICAO 9303 specimen documents, including composite check digits
+      # and single-character tampering.
+      - name: MRZ assertions
+        run: npm run test:mrz
+
+      # Every edge function is checked for syntax. This is not a full
+      # typecheck — it catches the breakage that would take a function
+      # down on deploy, which is what matters without Deno here.
+      - name: Edge functions parse
+        run: |
+          status=0
+          for f in $(find supabase/functions -name '*.ts' | sort); do
+            if node --experimental-strip-types --check "$f" 2>/tmp/parse.log; then
+              echo "ok   $f"
+            else
+              echo "::error file=$f::Does not parse"
+              cat /tmp/parse.log
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Console builds
+        run: npm run build
+
+      # The image-quality maths decide whether a capture is usable, so
+      # a regression there silently degrades every face match. Runs in
+      # real Chromium against synthetic images with known properties.
+      # playwright-core drives a browser but does not download one, so
+      # fetch Chromium into the registry the tests resolve from.
+      - name: Install Chromium
+        run: npx --yes playwright@1.63.0 install --with-deps chromium
+
+      - name: Capture quality maths
+        run: node tests/run-capture-metrics.mjs
+
+      # The vision code against scenes whose answer is known by
+      # construction: a textured ellipsoid under a real perspective
+      # projection against the same render put through an affine warp,
+      # a genuine card against one with a portrait pasted onto it, one
+      # face against another. Everything under test there makes a claim
+      # about physics, and a claim like that is worth nothing unless
+      # something checks it.
+      - name: Vision maths
+        run: npm run test:vision
+
+      # The whole capture wizard end to end against the real pipeline —
+      # three journeys that have to end differently: the applicant's own
+      # document, somebody else's, and the same face presented under a
+      # second identity number.
+      - name: Onboarding wizard end to end
+        run: node tests/run-onboarding-wizard.mjs
+
+      # The dataset the console ships with: that every module carries
+      # real volume, that the records agree with one another, and that
+      # the figures were computed rather than written down.
+      - name: Dataset checks
+        run: npm run test:dataset
+
+      # Everything above proves the arithmetic and the parts. This
+      # proves the thing a person actually looks at: sixteen pages, a
+      # case, a customer profile and a stored adjudication, rendered by
+      # the shipped bundle. A null where the console expects a string
+      # renders an error panel, and every other suite here would still
+      # be green.
+      - name: Console pages render
+        run: |
+          npm run build
+          node tests/run-console-pages.mjs
+
+      # And the single-file build, opened over file:// with nothing
+      # serving it. A module script is deferred and a classic one is
+      # not, so this artefact can break while every other suite here
+      # stays green.
+      - name: The single file runs from disk
+        run: npm run test:single
