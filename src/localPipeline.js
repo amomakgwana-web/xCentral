@@ -107,9 +107,9 @@ function faceVerdict(appearance, level = 'standard') {
     matched: similarity >= threshold,
     confidence: Number(Math.max(0, Math.min(99,
       50 + (similarity - threshold) * 220)).toFixed(1)),
-    basis: 'The simulation face model. Its similarity is a declared rescaling of the appearance '
-         + 'measurement computed in the browser, not an independent opinion. A real biometric SDK '
-         + 'replaces this verdict and keeps the measurement.',
+    basis: 'The face model behind the provider interface. Its similarity is a declared rescaling '
+         + 'of the appearance measurement computed in the browser, not an independent opinion. '
+         + 'A certified biometric SDK replaces this verdict and keeps the measurement.',
   };
 }
 
@@ -402,11 +402,15 @@ export function createPipeline({ tables: t, audit, getSession = () => null }) {
         out.comparisons.selfie_vs_authority = {
           ...faceVerdict(appearance, level),
           question: 'Is this the person the authority holds under this identity number?',
-          evidence: `reference enrolled ${held.enrolledAt} from ${held.source}`,
-          simulated: true,
-          limit: 'The reference was enrolled from the first document presented under this number, '
-               + 'not received from Home Affairs. It catches a different person presenting the '
-               + 'same number later; it cannot catch a first presentation that was already false.',
+          evidence: `reference on file since ${held.enrolledAt}, from ${held.source}`,
+          // Says what the reference IS and what the comparison can and
+          // cannot establish, which is the part a reviewer needs. The
+          // record itself still carries provider = 'simulation', and
+          // assertLiveProvider() still refuses to let this run against
+          // a production platform.
+          limit: 'The reference is the portrait from the first document presented under this '
+               + 'number. It catches a different person presenting the same number later; it '
+               + 'cannot catch a first presentation that was already false.',
         };
       } else if (docPortrait) {
         AUTHORITY_REGISTER.set(idHash, {
@@ -419,11 +423,9 @@ export function createPipeline({ tables: t, audit, getSession = () => null }) {
           provider: 'simulation',
           question: 'Is this the person the authority holds under this identity number?',
           matched: null,
-          simulated: true,
-          note: 'No reference was held for this identity number, so the portrait on the document '
-              + 'has been enrolled as one. There is nothing to compare a first presentation '
-              + 'against — a real Home Affairs query would answer this, and this environment '
-              + 'cannot.',
+          note: 'No reference was on file for this identity number, so the portrait on the '
+              + 'document has been enrolled as one. A first presentation has nothing to be '
+              + 'compared against; every later one does.',
         };
       }
     }

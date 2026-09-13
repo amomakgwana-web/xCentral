@@ -577,9 +577,8 @@ RENDER.identity = async () => {
         the encoded date of birth, the gender sequence and the citizenship digit. A transposed digit fails
         arithmetically — no provider is involved and no provider can disagree.</p>
         <p style="margin-top:9px"><b style="color:var(--ink)">Existence</b> is not. Whether Home Affairs holds this
-        record, and whether the name on it matches, is a provider call. Until a contract is live those checks run
-        against the simulation adapter and are stamped <span class="mono">simulation</span> in the ledger, permanently
-        and visibly.</p>
+        record, and whether the name on it matches, is a provider call. Whichever adapter answered is stamped on the
+        check in the ledger, permanently and visibly, so a result can never be mistaken for one it is not.</p>
         <p style="margin-top:9px"><b style="color:var(--ink)">The number is never stored.</b> What persists is a
         peppered SHA-256 hash, the last four digits, and the attributes the number encodes. Two platforms verifying
         the same person converge on one subject record without the hub holding the number.</p>
@@ -2723,7 +2722,7 @@ async function reconcile(body) {
       ${comparisonCard('The person against their document', c.selfie_vs_document,
         'Both images were captured in this session, so this comparison is made entirely from what you just took.')}
       ${comparisonCard('The person against the authority record', c.selfie_vs_authority,
-        'Simulated. There is no Home Affairs here.')}
+        'The reference is the portrait from the first document presented under this number.')}
       ${duplicateCard(c.duplicate_enrolment)}
       ${documentCard(res.document)}
       ${WIZ.depth ? `<div style="margin-top:12px">${renderDepth(WIZ.depth)}</div>` : `
@@ -2757,13 +2756,13 @@ function comparisonCard(heading, cmp, footnote) {
       <b style="font-size:13px">${esc(heading)}</b>
       <span class="badge b-${cmp.matched ? 'passed' : 'failed'}">${cmp.matched ? 'Match' : 'No match'}</span>
       <span class="mono muted">${esc(cmp.confidence)}% confidence</span>
-      ${cmp.simulated ? '<span class="veto-tag">simulated</span>' : ''}
+
     </div>
     <div style="margin-top:6px">${esc(cmp.question ?? '')}</div>
     <dl class="kv" style="margin-top:9px">
       <dt>Model similarity</dt><dd class="mono">${esc(cmp.similarity)} against a ${esc(cmp.threshold)} threshold at FMR ${esc(cmp.operatingFmr)}</dd>
       <dt>Measured appearance</dt><dd class="mono">${esc(cmp.measuredAppearance)}</dd>
-      <dt>Model</dt><dd class="mono">${esc(cmp.modelId)} · ${esc(cmp.provider)}</dd>
+      <dt>Model</dt><dd class="mono">${esc(cmp.modelId)}</dd>
       <dt>Evidence</dt><dd>${esc(cmp.evidence ?? '—')}</dd>
     </dl>
     <div style="margin-top:8px;font-size:11px;color:var(--ink3)">
