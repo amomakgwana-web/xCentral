@@ -24,6 +24,7 @@ import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
+import { PAPERS } from './papers.mjs';
 
 function resolveChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
@@ -227,6 +228,57 @@ for (const spec of PAGES) {
   else if (!/never put to the agents/i.test(unrun)) fail(`an unadjudicated session shows: ${unrun.slice(0, 120)}`);
   else pass('a session still capturing says so instead of rendering an empty panel');
   await page.evaluate(() => window.closeModal());
+}
+
+// ── The document scanner, driven from the page it lives on ──────
+// The engine has its own suite against documents built to be wrong.
+// This is the other half: that the page actually reaches it, that the
+// pipeline records what it found, and that a reviewer sees a verdict
+// rather than a stack trace.
+{
+  const before = pageErrors.length;
+  await page.evaluate(() => window.closeModal());
+  await page.click('#nav button[data-page="documents"]');
+  await page.waitForSelector('#scanPick', { timeout: 15000 });
+  await page.addScriptTag({ content: PAPERS });
+
+  await page.selectOption('#scanType', 'payslip');
+  await page.fill('#scanSubject', 'sub_scan_a');
+  await page.evaluate(async () => {
+    const p = await window.papers();
+    const dt = new DataTransfer();
+    dt.items.add(p.tampered);
+    const input = document.getElementById('scanFile');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForSelector('#scanAgain', { timeout: 40000 });
+
+  const body = (await page.locator('#scanResult').innerText()).replace(/\s+/g, ' ');
+  const raised = pageErrors.slice(before);
+  if (raised.length) fail(`the document scanner — ${raised.join(' | ')}`);
+  else if (!/Failed/i.test(body)) fail(`an edited payslip was not failed: ${body.slice(0, 200)}`);
+  else if (!/earlier version of this page is still inside the file/i.test(body)) {
+    fail('the page does not show the document\'s own earlier wording');
+  } else pass(`the scanner runs from the page and fails an edited payslip · ${body.slice(0, 110)}`);
+
+  // And it is recorded, so the next upload has something to be
+  // compared against and the page lists what has been examined.
+  const before2 = pageErrors.length;
+  await page.evaluate(async () => {
+    const p = await window.papers();
+    const dt = new DataTransfer();
+    dt.items.add(p.tampered);
+    const input = document.getElementById('scanFile');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForTimeout(2500);
+  const second = (await page.locator('#scanResult').innerText()).replace(/\s+/g, ' ');
+  if (pageErrors.slice(before2).length) fail('the second scan raised an error');
+  else if (!/Identical File|Already on file|What it matches/i.test(second)) {
+    fail(`the same file scanned twice was not recognised: ${second.slice(0, 200)}`);
+  } else pass('the same document scanned twice is recognised the second time');
 }
 
 // ── No biometric descriptor reaches a page ──────────────────────

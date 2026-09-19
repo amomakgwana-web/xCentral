@@ -38,7 +38,7 @@ const CONFIGURATION = new Set([
   // portrait can fail to belong to the card it is on. Padding either
   // to two hundred would make the document pages lie about what the
   // system can actually check.
-  'document_security_features', 'document_forensic_rules',
+  'document_security_features', 'document_forensic_rules', 'document_scan_rules',
 ]);
 
 // ── Volume ──────────────────────────────────────────────────────

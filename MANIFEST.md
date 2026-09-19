@@ -21,7 +21,7 @@ first two; the full history is on the branch `claude/tender-goodall-klf1yl`.
 | `README.md` | What is real arithmetic and what needs a provider — read this first |
 | `supabase/migrations/` | The schema, in order. Most of the system's guarantees are here |
 | `src/capture.js` | Live camera, image-quality maths, WebAuthn |
-| `src/vision/` | Depth from parallax, face appearance, document forensics — the arithmetic behind the live capture |
+| `src/vision/` | Depth from parallax, face appearance, document forensics and the scanning engine |
 | `src/localPipeline.js` | The verification pipeline as it runs with no services attached |
 | `supabase/functions/agent-adjudicate/index.ts` | The six agents and the orchestrator |
 
@@ -41,6 +41,9 @@ src/
     face.js                    locating a face, and how alike two of them look
     depth.js                   parallax across a guided head movement: 3D from a flat camera
     document.js                is the portrait printed on this card, or stuck to it
+    pdf.js                     taking a PDF apart from the bytes, with no library
+    fingerprint.js             the same file, the same picture, the same words
+    scan.js                    altered, never genuine, or already on file
   data/                        the generated dataset, and the arithmetic it is computed with
 
 supabase/migrations/           applied in filename order
@@ -61,6 +64,7 @@ supabase/migrations/           applied in filename order
   …0015_wire_unevaluated_fraud_rules  three registered rules nothing ever evaluated
   …0016_behaviour_credit_for_late_payment  a late payer is not a defaulter
   …0017_document_forensics         what each document carries, and what a pasted portrait costs
+  …0018_document_scanning          altered, counterfeit or duplicate, and what each costs
 
 supabase/functions/
   _shared/                     http, hash, auth, cases, mrz, providers

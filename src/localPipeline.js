@@ -33,7 +33,7 @@
 import { validateSaId } from './data/compute.js';
 import {
   agents as AGENT_DEFS, appearance_thresholds, biometric_modalities,
-  document_forensic_rules, document_security_features,
+  document_forensic_rules, document_scan_rules, document_security_features,
 } from './data/reference.js';
 import { iso, tag } from './data/generate.js';
 
@@ -44,6 +44,11 @@ const FACE_MODALITY = biometric_modalities.find((m) => m.id === 'face');
 // not stored anywhere in this system.
 const AUTHORITY_REGISTER = new Map();
 
+// Every document scanned in this session, with its fingerprints. The
+// duplicate check is only as good as what it can compare against, and
+// this is that.
+const SCAN_CORPUS = [];
+
 // Every descriptor ever enrolled here, so the same face arriving under
 // a second identity number can be found. This is the check that
 // catches a syndicate enrolling one person under many identities, and
@@ -53,6 +58,7 @@ const ENROLLED_FACES = [];
 export function resetLocalPipeline() {
   AUTHORITY_REGISTER.clear();
   ENROLLED_FACES.length = 0;
+  SCAN_CORPUS.length = 0;
 }
 
 function cosine(a, b) {
@@ -141,6 +147,44 @@ function scoreDocument(docType, firedCodes, mrzResult) {
     decisive,
     findings: explained,
     criticalCount: explained.filter((e) => e.severity === 'critical').length,
+  };
+}
+
+// ── Scanning an uploaded document ───────────────────────────────
+// The same shape as the forensic score above, over a different set of
+// rules, and split by the question each finding answers — because
+// "altered", "never genuine" and "already seen" call for three
+// different conversations with the applicant, and a single number
+// collapses them into one.
+function scoreScan(firedCodes) {
+  const rules = new Map(document_scan_rules.map((r) => [r.code, r]));
+  const findings = [];
+  let deduction = 0;
+  let decisive = false;
+
+  for (const code of firedCodes) {
+    const rule = rules.get(code);
+    if (!rule) continue;
+    deduction += rule.weight;
+    if (rule.decisive) decisive = true;
+    findings.push({
+      code, name: rule.name, weight: rule.weight,
+      severity: rule.severity, question: rule.question,
+    });
+  }
+
+  const score = Math.max(0, Math.min(100, 100 - deduction));
+  const byQuestion = (q) => findings.filter((f) => f.question === q);
+
+  return {
+    score,
+    status: decisive || score < 45 ? 'failed' : score < 78 ? 'manual_review' : 'passed',
+    decisive,
+    findings,
+    altered: byQuestion('altered'),
+    counterfeit: byQuestion('counterfeit'),
+    duplicate: byQuestion('duplicate'),
+    criticalCount: findings.filter((f) => f.severity === 'critical').length,
   };
 }
 
@@ -742,6 +786,140 @@ export function createPipeline({ tables: t, audit, getSession = () => null }) {
     };
   }
 
+  // ── A scanned document ────────────────────────────────────────
+  // The page does the reading — it has the file, and the file never
+  // leaves the tab. This decides what the readings mean, records the
+  // document, and adds its fingerprints to the corpus the NEXT scan is
+  // compared against. That last part is what makes the duplicate check
+  // work at all: a register with nothing in it can only ever answer
+  // "no match", which is not the same as "not a duplicate".
+  function recordScan(body) {
+    const scan = body.scan ?? {};
+    const scored = scoreScan(scan.firedCodes ?? []);
+    const docId = `doc_live_${t.documents.length + 1}`;
+    const at = now();
+
+    t.documents.unshift({
+      id: docId,
+      case_id: body.caseId ?? null,
+      subject_id: body.subjectId ?? null,
+      doc_type: body.docType ?? 'unknown',
+      // Nothing is stored. The path records where it would have gone.
+      storage_path: null,
+      mime_type: scan.file?.mime ?? null,
+      size_bytes: scan.file?.bytes ?? null,
+      page_count: scan.pdf?.pages ?? 1,
+      sha256: scan.fingerprints?.sha256 ?? null,
+      uploaded_by: session?.user?.id ?? null,
+      uploaded_via: 'console',
+      // FICA s22: five years from the end of the relationship.
+      retention_until: iso(new Date(Date.now() + 60 * 30 * 86400000)),
+      purged_at: null,
+      created_at: at,
+    });
+
+    t.document_verifications.unshift({
+      id: `dv_live_${t.document_verifications.length + 1}`,
+      case_id: body.caseId ?? null,
+      check_id: null,
+      document_id: docId,
+      doc_type: body.docType ?? 'unknown',
+      mrz_present: false,
+      mrz_valid: null,
+      mrz_fields: {},
+      extracted: scan.arithmetic?.applicable ? scan.arithmetic.figures : {},
+      document_number_last4: null,
+      date_of_issue: null,
+      date_of_expiry: null,
+      expired: false,
+      stale: false,
+      authenticity_score: scored.score,
+      tamper_signals: scored.findings.map((f) => ({
+        code: f.code, severity: f.severity,
+        detail: (scan.signals ?? []).find((sig) => sig.code === f.code)?.detail ?? f.name,
+      })),
+      provider: 'xcentral',
+      created_at: at,
+    });
+
+    t.document_forensics.unshift({
+      id: `df_live_${t.document_forensics.length + 1}`,
+      document_id: docId,
+      perceptual_hash: scan.fingerprints?.perceptual ?? null,
+      producer_software: scan.pdf?.meta?.producer ?? scan.pdf?.meta?.creator ?? null,
+      creation_date: scan.pdf?.meta?.createdAt ?? null,
+      modification_date: scan.pdf?.meta?.modifiedAt ?? null,
+      has_digital_signature: Boolean(scan.pdf?.signatures),
+      signature_valid: null,
+      findings: scored.findings.map((f) => ({ code: f.code, severity: f.severity })),
+      provider: 'xcentral',
+      created_at: at,
+    });
+
+    // Into the corpus, so the next upload has something to be compared
+    // against. Keyed on the document, carrying the subject, because
+    // the finding that matters is not "this is a duplicate" but "this
+    // is a duplicate belonging to somebody else".
+    SCAN_CORPUS.push({
+      id: docId,
+      subject_id: body.subjectId ?? null,
+      doc_type: body.docType ?? 'unknown',
+      sha256: scan.fingerprints?.sha256 ?? null,
+      perceptual_hash: scan.fingerprints?.perceptual ?? null,
+      text_fingerprint: scan.fingerprints?.text ?? null,
+      created_at: at,
+    });
+
+    if (body.caseId) {
+      t.verification_checks.unshift({
+        id: `chk_live_scan_${t.verification_checks.length + 1}`,
+        case_id: body.caseId,
+        domain: 'document',
+        check_type: 'authenticity',
+        provider: 'xcentral',
+        status: scored.status,
+        score: scored.score,
+        result: { document_id: docId, findings: scored.findings.map((f) => f.code) },
+        reason_codes: scored.findings.map((f) => f.code),
+        created_at: at,
+      });
+    }
+
+    audit('document.scanned', 'document', docId, {
+      doc_type: body.docType ?? 'unknown',
+      status: scored.status,
+      duplicates: (scan.duplicates ?? []).length,
+    });
+
+    return {
+      documentId: docId,
+      ...scored,
+      corpusSize: SCAN_CORPUS.length,
+      duplicates: scan.duplicates ?? [],
+    };
+  }
+
+  // What a new scan is compared against: every document already held,
+  // with whatever fingerprints it has. The generated records carry a
+  // hash and a perceptual hash but no content fingerprint — nothing
+  // ever read their text, because there was never a file. So a scan
+  // can collide with them by hash, and matches by content only appear
+  // once two real documents have been through here. That is a limit of
+  // the corpus, not of the check, and the result says how many
+  // documents it was compared against so the difference is visible.
+  function scanCorpus() {
+    return [...SCAN_CORPUS, ...t.documents
+      .filter((d) => d.sha256 && !d.id.startsWith('doc_live_'))
+      .map((d) => ({
+        id: d.id,
+        subject_id: d.subject_id,
+        doc_type: d.doc_type,
+        sha256: d.sha256,
+        perceptual_hash: t.document_forensics.find((f) => f.document_id === d.id)?.perceptual_hash ?? null,
+        text_fingerprint: null,
+      }))];
+  }
+
   function applyDecision(body) {
     const run = t.agent_runs.find((r) => r.id === body.runId);
     if (!run) throw new Error('No such adjudication.');
@@ -753,5 +931,8 @@ export function createPipeline({ tables: t, audit, getSession = () => null }) {
     return { runId: run.id, outcome: run.human_outcome };
   }
 
-  return { verifyIdentity, openSession, submitCapture, reconcile, adjudicate, applyDecision };
+  return {
+    verifyIdentity, openSession, submitCapture, reconcile, adjudicate, applyDecision,
+    recordScan, scanCorpus,
+  };
 }

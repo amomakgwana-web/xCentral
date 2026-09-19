@@ -47,6 +47,10 @@ provider can disagree with them:
 | Face appearance similarity | `src/vision/face.js` | `run-vision.mjs` |
 | Portrait substitution forensics | `src/vision/document.js` | `run-vision.mjs` |
 | Document forensic scoring | `score_document_forensics()`, `localPipeline.js` | `capture_tests.sql` |
+| PDF structure, revisions, metadata and text layer | `src/vision/pdf.js` | `run-doc-scan.mjs` |
+| Document fingerprints — exact, perceptual, content | `src/vision/fingerprint.js` | `run-doc-scan.mjs` |
+| Payslip and statement reconciliation | `src/vision/scan.js` | `run-doc-scan.mjs` |
+| Document scan scoring | `score_document_scan()`, `localPipeline.js` | `capture_tests.sql` |
 
 **Requires an authority we do not have offline.** These run through the
 provider adapters in `_shared/providers.ts`:
@@ -329,6 +333,77 @@ element. That proves the enrolled owner of that device was present, not that a
 particular person's finger was. AFIS-grade capture needs a scanner SDK. The
 distinction is preserved in the schema, the API responses and the UI copy.
 
+## Scanning an uploaded document
+
+The counter flow handles the document somebody is holding. This handles
+the ones they send in — a payslip, a bank statement, proof of address —
+and asks three questions of each, because they need different evidence and
+lead to different conversations:
+
+**Was this document altered?** Somebody took a real document and changed
+it. The page looks right; the file does not. A PDF saved a second time
+**keeps the first version inside it**, so the document carries its own edit
+history; the software that did it writes its name into the metadata; and a
+number typed over an existing page rarely lands in the same font as the
+ones beside it.
+
+The strongest finding available is the last of those: where an earlier
+version of a page is still in the file, the scan recovers it and prints
+what changed — *was 19800.00, now 29800.00*. That is not an inference from
+metadata. It is the document's own previous wording, preserved by the act
+of saving over it.
+
+**Was it ever genuine?** Nobody altered anything, because nobody started
+from a real document. The giveaway is **arithmetic**: a payroll system
+cannot emit a payslip where gross less deductions is not net, and a person
+building one in a spreadsheet very often can, because they changed the
+number they cared about and not the three that depend on it. A statement
+with no text layer at all is a picture in a PDF wrapper, which is what a
+rebuilt document looks like.
+
+**Has it been seen before?** A duplicate arrives in three forms and each
+defeats the check above it, so there are three fingerprints:
+
+| | Catches | Survives |
+|---|---|---|
+| SHA-256 | The same file | Nothing — any change at all breaks it |
+| Perceptual hash | The same picture re-saved, re-compressed, lightly cropped | Everything an honest copy does to an image |
+| Content fingerprint | The same statement re-exported by different software | Different bytes, different fonts, different producer |
+
+The third is the one that matters. A payslip submitted under two identities
+is usually not the same file — it has been opened, edited and saved — but
+it is the same employer, the same month and very nearly the same numbers.
+A MinHash signature over four-word shingles finds that, and the scan
+reports it as **the same document under two identities** rather than merely
+a duplicate, because that is the finding worth acting on.
+
+### The PDF reader
+
+There is no PDF library here. The reader takes the file apart from the
+bytes: header, revision count, the trailer chain, the document information
+dictionary, the XMP editing history, embedded fonts, signatures, and the
+text layer — inflating compressed content streams with the browser's own
+`DecompressionStream`. It runs offline, in the tab, with nothing installed.
+
+It does **not** render pages, decrypt, or read a cross-reference stream for
+object lookup. A document whose metadata sits inside an object stream
+reports its producer as unknown rather than guessing, and *unknown* is
+reported as unknown rather than as clean.
+
+### What it cannot do
+
+No reference library of genuine issuer templates. No certificate chain
+validated for a signed PDF. No optical character recognition — so a scanned
+paper document yields no text, the arithmetic checks do not run on it, and
+the scan **says so** rather than passing it for want of evidence.
+
+Only two findings settle the question on their own, and both are cases
+where the document contradicts *itself*: arithmetic that does not balance,
+and an earlier version of the page saying something different. Everything
+else is weighted, held as a row, and refers to a person — because being
+saved twice is something an HR clerk does, and refusing on it would turn
+ordinary office habits into a fraud allegation.
+
 ## The agents
 
 Six agents plus an orchestrator. Each owns one question, forms its own verdict
@@ -534,6 +609,11 @@ npm run test:single
 # same render put through an affine warp, a genuine card against one
 # with a portrait pasted on, one face against another
 npm run test:vision
+
+# The document scanner against six PDFs, each differing from the
+# clean one in exactly one respect — including a fabricated payslip
+# that reconciles perfectly, because whoever built it did the sums
+npm run test:docscan
 
 # The whole capture wizard end to end against the real pipeline —
 # three journeys that have to end differently: the applicant's own

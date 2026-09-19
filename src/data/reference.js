@@ -100,6 +100,51 @@ export const document_forensic_rules = [
   { code: 'ghost_portrait_absent',           name: 'Ghost portrait missing',                    weight: 10, severity: 'warn',     decisive: false },
 ];
 
+// What each scanning finding costs a document, and which of the three
+// questions it answers. Weights are rows so tuning is an update and a
+// decision made last March stays explicable against the weights that
+// were in force in March.
+//
+// Only one rule is decisive: arithmetic that does not reconcile. Every
+// other finding here describes a document that looks unusual, and
+// unusual has innocent explanations — a payslip really can be re-saved
+// by an HR clerk, metadata really is stripped by some mail gateways.
+// A document that contradicts itself has none.
+export const document_scan_rules = [
+  // Altered
+  { code: 'pdf_saved_more_than_once',        question: 'altered',     name: 'Saved more than once',                    weight: 16, severity: 'warn',     decisive: false },
+  { code: 'pdf_modified_after_creation',     question: 'altered',     name: 'Modified after it was created',           weight: 18, severity: 'warn',     decisive: false },
+  { code: 'pdf_producer_is_image_editor',    question: 'altered',     name: 'Produced by an image editor',             weight: 34, severity: 'critical', decisive: false },
+  { code: 'pdf_producer_is_word_processor',  question: 'altered',     name: 'Produced by a word processor',            weight: 20, severity: 'warn',     decisive: false },
+  { code: 'pdf_metadata_stripped',           question: 'altered',     name: 'Metadata removed',                        weight: 14, severity: 'warn',     decisive: false },
+  { code: 'pdf_edit_history_present',        question: 'altered',     name: 'Carries an editing history',              weight: 24, severity: 'critical', decisive: false },
+  { code: 'pdf_figure_in_a_foreign_font',    question: 'altered',     name: 'A figure set in a foreign font',          weight: 32, severity: 'critical', decisive: false },
+  // The previous wording of the page, still in the file, disagreeing
+  // with the current one. Not an inference — the document's own
+  // earlier version, which is why it is the one altered-document rule
+  // that settles the question by itself.
+  { code: 'pdf_previous_version_differs',    question: 'altered',     name: 'An earlier version said something else',  weight: 60, severity: 'critical', decisive: true },
+  { code: 'image_region_edited',             question: 'altered',     name: 'A region of the page was edited',         weight: 30, severity: 'critical', decisive: false },
+  // Counterfeit
+  { code: 'arithmetic_does_not_reconcile',   question: 'counterfeit', name: 'The document does not add up',            weight: 55, severity: 'critical', decisive: true },
+  { code: 'pdf_is_a_picture_in_a_wrapper',   question: 'counterfeit', name: 'A picture in a PDF wrapper',              weight: 22, severity: 'warn',     decisive: false },
+  { code: 'layout_matches_no_known_issuer',  question: 'counterfeit', name: 'Matches no known issuer template',        weight: 18, severity: 'warn',     decisive: false },
+  // Duplicate
+  { code: 'document_already_on_file',        question: 'duplicate',   name: 'Already on file',                         weight: 12, severity: 'warn',     decisive: false },
+  { code: 'document_reused_across_identities', question: 'duplicate', name: 'The same document under two identities',   weight: 45, severity: 'critical', decisive: false },
+];
+
+// How close two documents have to be before they are the same
+// document. Three measures, because a duplicate arrives in three forms
+// and each defeats the one above it.
+export const duplicate_thresholds = {
+  perceptual_distance: 8,   // of 64 comparisons; a re-save moves a handful
+  content_overlap: 0.72,    // estimated Jaccard over four-word shingles
+  note: 'Exact hash catches the same file, perceptual distance catches the same picture re-saved, '
+      + 'and content overlap catches the same statement re-exported. Calibrated against the '
+      + 'synthetic documents in tests/run-doc-scan.mjs and against no real corpus.',
+};
+
 // The measurement the browser can make is appearance similarity, not a
 // biometric match, so it gets its own thresholds under its own name
 // rather than borrowing the face model's. These were calibrated

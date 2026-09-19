@@ -69,7 +69,7 @@ const PAGES = [
   { id: 'dashboard',  label: 'Home',     title: 'Verification Overview',        sub: 'Live case flow across every calling platform' },
   { id: 'cases',      label: 'Cases',    title: 'Verification Cases',           sub: 'Every case, its checks, and its decision' },
   { id: 'identity',   label: 'Identity', title: 'Identity Verification',        sub: 'SA ID structure · Home Affairs lookup · deceased register' },
-  { id: 'documents',  label: 'Docs',     title: 'Document Verification',        sub: 'MRZ check digits · authenticity · expiry · private storage' },
+  { id: 'documents',  label: 'Docs',     title: 'Document Verification',        sub: 'Scan an upload for tampering, fabrication and reuse · MRZ check digits · private storage' },
   { id: 'credit',     label: 'Credit',   title: 'Credit Verification',          sub: 'Bureau enquiries · NCA Regulation 23A affordability' },
   { id: 'biometrics', label: 'Bio',      title: 'Biometric Verification',       sub: 'Face match · liveness · duplicate enrolment' },
   { id: 'onboard',    label: 'Capture',  title: 'Live Capture & Onboarding',    sub: 'The identity number, the person, their document — then everything reconciled against everything else' },
@@ -620,19 +620,87 @@ WIRE.identity = () => {
 };
 
 RENDER.documents = async () => {
-  const [types, policies] = await Promise.all([DB.fetchDocumentTypes(), DB.fetchRetentionPolicies()]);
+  const [types, policies, docs, verifications, forensics, rules] = await Promise.all([
+    DB.fetchDocumentTypes(),
+    DB.fetchRetentionPolicies(),
+    DB.fetchDocuments().catch(() => []),
+    DB.fetchDocumentVerifications().catch(() => []),
+    DB.fetchDocumentForensics().catch(() => []),
+    DB.fetchScanRules().catch(() => []),
+  ]);
   const docPolicy = policies.find((p) => p.id === 'doc_images');
+  const vByDoc = new Map(verifications.map((v) => [v.document_id, v]));
+  const fByDoc = new Map(forensics.map((f) => [f.document_id, f]));
+  const typeName = new Map(types.map((t) => [t.id, t.name]));
 
-  const typeRows = types.map((t) => `
-    <tr>
-      <td><b>${esc(t.name)}</b></td>
-      <td>${badge(t.category)}</td>
-      <td>${t.has_mrz ? '<span class="badge b-passed">Yes</span>' : '<span class="muted">—</span>'}</td>
-      <td>${t.has_portrait ? '<span class="badge b-passed">Yes</span>' : '<span class="muted">—</span>'}</td>
-      <td class="muted">${t.max_age_days ? t.max_age_days + ' days' : 'Does not go stale'}</td>
+  const examined = docs.slice(0, 200).map((d) => {
+    const v = vByDoc.get(d.id);
+    const f = fByDoc.get(d.id);
+    const score = v?.authenticity_score ?? null;
+    const signals = v?.tamper_signals ?? [];
+    return `<tr>
+      <td class="mono">${esc(d.id)}</td>
+      <td>${esc(typeName.get(d.doc_type) ?? titleCase(d.doc_type))}</td>
+      <td class="muted">${esc(d.mime_type ?? '—')}</td>
+      <td>${score === null ? '<span class="muted">—</span>'
+        : `<span class="badge b-${score >= 78 ? 'passed' : score >= 45 ? 'review' : 'failed'}">${esc(score)}/100</span>`}</td>
+      <td>${signals.length
+        ? `<span class="badge b-${signals.some((s) => s.severity === 'critical') ? 'failed' : 'review'}">${signals.length}</span>`
+        : '<span class="muted">none</span>'}</td>
+      <td class="muted">${esc(f?.producer_software ?? '—')}</td>
+      <td class="mono muted">${esc((d.sha256 ?? '').slice(0, 12) || '—')}</td>
+      <td class="muted">${esc(fmtDate(d.created_at))}</td>
+    </tr>`;
+  }).join('');
+
+  const byQuestion = (q) => rules.filter((r) => r.question === q);
+  const ruleTable = (q) => byQuestion(q).map((r) => `<tr>
+      <td>${esc(r.name)}</td>
+      <td class="mono muted">${esc(r.code)}</td>
+      <td class="mono">−${esc(r.weight)}</td>
+      <td>${chip(r.severity === 'critical' ? 'failed' : 'review', titleCase(r.severity))}
+        ${r.decisive ? '<span class="veto-tag">decisive</span>' : ''}</td>
     </tr>`).join('');
 
   return `
+  <div class="card" style="margin-top:0">
+    <div class="card-hdr"><div><div class="card-title">Scan a document</div>
+      <div class="card-sub">Altered, fabricated, or already on file — three questions, three kinds of evidence</div></div></div>
+    <div class="card-body">
+      <div class="note note-info" style="margin-top:0">
+        <b>The file is read here, in this page, and goes nowhere.</b> A PDF is taken apart —
+        how many times it has been saved, what produced it, which fonts each figure is set in, and
+        whether an earlier version of the page is still inside it. An image is examined for regions
+        that compress unlike the rest of the page. Either way the document is fingerprinted three
+        ways and compared against everything already held.
+      </div>
+      <div class="row2" style="margin-top:12px">
+        <div class="field"><label for="scanType">What is this document?</label>
+          <select id="scanType">
+            <option value="payslip">Payslip</option>
+            <option value="bank_statement">Bank Statement</option>
+            <option value="proof_of_address">Proof of Address</option>
+            <option value="sa_id_card">SA Smart ID Card</option>
+            <option value="sa_id_book">SA Green Barcoded ID Book</option>
+            <option value="cipc_registration">CIPC Company Registration</option>
+            <option value="sars_tax_clearance">SARS Tax Clearance</option>
+            <option value="unknown">Something else</option>
+          </select>
+          <div class="hint">A payslip and a bank statement are checked against their own arithmetic.
+          Nothing else can be, and the scan says so rather than passing it for want of evidence.</div></div>
+        <div class="field"><label for="scanSubject">Whose document is it?</label>
+          <input id="scanSubject" placeholder="Subject reference — optional">
+          <div class="hint">Given one, a match already on file can be reported as belonging to
+          somebody else, which is the finding that matters.</div></div>
+      </div>
+      <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:6px">
+        <button class="btn btn-primary btn-sm" id="scanPick">Choose a file to scan</button>
+        <input type="file" id="scanFile" accept="application/pdf,image/*" hidden>
+      </div>
+      <div id="scanResult"></div>
+    </div>
+  </div>
+
   <div class="note note-info">
     <b>Documents are never reachable by URL.</b> The bucket is private and carries no client policy, so a staff
     member cannot open an ID scan even with a valid session. Access goes through the
@@ -641,11 +709,44 @@ RENDER.documents = async () => {
     ${docPolicy ? `Images are deleted after <b>${docPolicy.retain_days} days</b> — ${esc(docPolicy.legal_basis)}.` : ''}
   </div>
 
+  ${docs.length ? `
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">Documents examined</div>
+      <div class="card-sub">${esc(docs.length)} on file · authenticity is what the examination scored, not what the uploader claimed</div></div></div>
+    <table><thead><tr>
+      <th>Document</th><th>Type</th><th>Format</th><th>Authenticity</th>
+      <th>Findings</th><th>Produced by</th><th>Hash</th><th>Received</th>
+    </tr></thead><tbody>${examined}</tbody></table>
+  </div>` : ''}
+
+  <div class="card">
+    <div class="card-hdr"><div><div class="card-title">What the scanner looks for</div>
+      <div class="card-sub">Weights are rows, so tuning is an update and a past decision stays explicable</div></div></div>
+    <div class="card-body" style="padding:0">
+      <table><thead><tr><th colspan="4" style="background:var(--bg2)">Was this document altered?</th></tr>
+        <tr><th>Finding</th><th>Code</th><th>Weight</th><th>Severity</th></tr></thead>
+        <tbody>${ruleTable('altered')}</tbody></table>
+      <table><thead><tr><th colspan="4" style="background:var(--bg2)">Was it ever genuine?</th></tr>
+        <tr><th>Finding</th><th>Code</th><th>Weight</th><th>Severity</th></tr></thead>
+        <tbody>${ruleTable('counterfeit')}</tbody></table>
+      <table><thead><tr><th colspan="4" style="background:var(--bg2)">Has it been seen before?</th></tr>
+        <tr><th>Finding</th><th>Code</th><th>Weight</th><th>Severity</th></tr></thead>
+        <tbody>${ruleTable('duplicate')}</tbody></table>
+    </div>
+  </div>
+
   <div class="card">
     <div class="card-hdr"><div><div class="card-title">Accepted document types</div>
       <div class="card-sub">Types with a machine-readable zone are check-digit verifiable without a provider</div></div></div>
     <table><thead><tr><th>Type</th><th>Category</th><th>MRZ</th><th>Portrait</th><th>Goes stale after</th></tr></thead>
-    <tbody>${typeRows}</tbody></table>
+    <tbody>${types.map((t) => `
+      <tr>
+        <td><b>${esc(t.name)}</b></td>
+        <td>${badge(t.category)}</td>
+        <td>${t.has_mrz ? '<span class="badge b-passed">Yes</span>' : '<span class="muted">—</span>'}</td>
+        <td>${t.has_portrait ? '<span class="badge b-passed">Yes</span>' : '<span class="muted">—</span>'}</td>
+        <td class="muted">${t.max_age_days ? t.max_age_days + ' days' : 'Does not go stale'}</td>
+      </tr>`).join('')}</tbody></table>
   </div>
 
   <div class="card">
@@ -667,6 +768,12 @@ L898902C36UTO7408122F1204159ZE184226B&lt;&lt;&lt;&lt;&lt;10"></textarea>
 };
 
 WIRE.documents = () => {
+  document.getElementById('scanPick').addEventListener('click',
+    () => document.getElementById('scanFile').click());
+  document.getElementById('scanFile').addEventListener('change', (e) => {
+    if (e.target.files?.[0]) runScan(e.target.files[0]);
+  });
+
   document.getElementById('mrzBtn').addEventListener('click', async () => {
     const out = document.getElementById('mrzResult');
     const raw = document.getElementById('mrzInput').value;
@@ -681,19 +788,163 @@ WIRE.documents = () => {
       const digits = Object.entries(r.checkDigits ?? {}).map(([k, v]) =>
         `<dt>${esc(titleCase(k))}</dt><dd>${v ? '<span class="badge b-passed">Passes</span>' : '<span class="badge b-failed">Fails</span>'}</dd>`).join('');
       out.innerHTML = `<div class="note ${r.valid ? 'note-info' : 'note-danger'}" style="margin-top:12px">
-        <b>${r.valid ? 'Internally consistent' : 'Not consistent'}</b> — format ${esc(r.format)}.
-        ${r.valid ? '' : '<br>This does not prove forgery on its own, but the zone does not check out.'}
-        <dl class="kv" style="margin-top:9px">${digits}
-          ${r.fields?.surname ? `<dt>Name</dt><dd>${esc([r.fields.given_names, r.fields.surname].filter(Boolean).join(' '))}</dd>` : ''}
-          ${r.fields?.document_number ? `<dt>Document number</dt><dd class="mono">${esc(r.fields.document_number)}</dd>` : ''}
-          ${r.fields?.date_of_birth ? `<dt>Date of birth</dt><dd>${fmtDate(r.fields.date_of_birth)}</dd>` : ''}
-          ${r.fields?.date_of_expiry ? `<dt>Expires</dt><dd>${fmtDate(r.fields.date_of_expiry)}</dd>` : ''}
-        </dl>
-        ${r.reasonCodes?.length ? `<div style="margin-top:7px">${esc(r.reasonCodes.map(titleCase).join(' · '))}</div>` : ''}
+        <b>${r.valid ? 'Every check digit holds' : 'A check digit fails'}</b> · format ${esc(r.format ?? '—')}
+        <dl class="kv" style="margin-top:9px">${digits}</dl>
+        ${(r.reasonCodes ?? []).length
+          ? `<div style="margin-top:7px">${esc(r.reasonCodes.map(titleCase).join(', '))}</div>` : ''}
       </div>`;
-    } catch (e) { out.innerHTML = errorState(e); }
+    } catch (e) {
+      out.innerHTML = errorState(e);
+    }
   });
 };
+
+// ── Scanning ────────────────────────────────────────────────────
+async function runScan(file) {
+  const out = document.getElementById('scanResult');
+  const docType = document.getElementById('scanType').value;
+  const subjectId = document.getElementById('scanSubject').value.trim() || null;
+  out.innerHTML = loading();
+
+  try {
+    const { scanDocument } = await import('./vision/scan.js');
+    const { corpus } = await DB.documentCorpus();
+
+    const scan = await scanDocument(file, { docType, subjectId, corpus });
+    // The findings are weighed by the pipeline, not here. A verdict
+    // computed in the page is a verdict the page can be edited to
+    // change.
+    const verdict = await DB.recordDocumentScan({ docType, subjectId, scan });
+
+    out.innerHTML = renderScan(scan, verdict, corpus.length)
+      + `<button class="btn btn-sm" style="margin-top:12px" id="scanAgain">Scan another</button>`;
+    document.getElementById('scanAgain').addEventListener('click', () => go('documents'));
+    toast(`Document ${verdict.status.replace(/_/g, ' ')} — ${verdict.score}/100`,
+      verdict.status === 'passed' ? 'ok' : 'err');
+  } catch (e) {
+    out.innerHTML = errorState(e);
+  }
+}
+
+function renderScan(scan, verdict, corpusSize) {
+  const tone = verdict.status === 'passed' ? 'note-info'
+    : verdict.status === 'failed' ? 'note-danger' : 'note-warn';
+  const detail = (code) => (scan.signals.find((s) => s.code === code) ?? {}).detail ?? '';
+
+  const question = (label, findings, nothing) => `
+    <div class="card" style="margin-top:12px">
+      <div class="card-hdr"><div><div class="card-title">${esc(label)}</div></div>
+        <div class="card-actions">${findings.length
+          ? `<span class="badge b-${findings.some((f) => f.severity === 'critical') ? 'failed' : 'review'}">${findings.length} finding${findings.length === 1 ? '' : 's'}</span>`
+          : '<span class="badge b-passed">Nothing found</span>'}</div></div>
+      <div class="card-body">
+        ${findings.length ? findings.map((f) => `
+          <div class="note ${f.severity === 'critical' ? 'note-danger' : 'note-warn'}" style="margin-top:8px">
+            <b>${esc(f.name)}</b> <span class="mono muted">−${esc(f.weight)}</span>
+            ${f.severity === 'critical' ? '<span class="veto-tag">critical</span>' : ''}
+            <div style="margin-top:5px">${esc(detail(f.code))}</div>
+          </div>`).join('')
+        : `<div class="muted" style="font-size:12px">${esc(nothing)}</div>`}
+      </div>
+    </div>`;
+
+  const p = scan.pdf;
+  return `
+    <div class="note ${tone}" style="margin-top:12px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <b style="font-size:14px">${esc(titleCase(verdict.status))}</b>
+        <span class="badge b-${verdict.status === 'passed' ? 'passed' : verdict.status === 'failed' ? 'failed' : 'review'}"
+          >${esc(verdict.score)}/100</span>
+        <span class="mono muted">${esc(scan.file.name)} · ${esc(Math.round(scan.file.bytes / 1024))} kB · ${esc(scan.route)}</span>
+      </div>
+      <div style="margin-top:7px">
+        ${verdict.decisive
+          ? 'A finding here settles the question on its own: the document contradicts itself, or carries its own earlier version saying something else.'
+          : verdict.findings.length
+            ? 'Every finding below has an innocent explanation and none of them is conclusive, which is exactly why a person should look.'
+            : 'Nothing inconsistent was found. That is not the same as knowing the document was issued — there is no reference library here to compare it against.'}
+      </div>
+      <div style="margin-top:6px;font-size:11px;color:var(--ink3)">
+        Recorded as <span class="mono">${esc(verdict.documentId)}</span>. Compared against
+        ${esc(corpusSize)} document(s) already held. The file itself was never stored.
+      </div>
+    </div>
+
+    ${question('Was this document altered?', verdict.altered,
+      'Nothing in the file says it was opened and changed after it was made.')}
+    ${question('Was it ever genuine?', verdict.counterfeit,
+      scan.arithmetic.applicable
+        ? `It reconciles: ${scan.arithmetic.statement}.`
+        : 'No arithmetic could be checked on this type of document, so nothing here shows it was fabricated — and nothing shows it was not.')}
+    ${question('Has it been seen before?', verdict.duplicate,
+      `Nothing on file matches it.`)}
+
+    ${scan.duplicates.length ? `
+      <div class="card" style="margin-top:12px">
+        <div class="card-hdr"><div><div class="card-title">What it matches</div></div></div>
+        <table><thead><tr><th>Document</th><th>Belongs to</th><th>How it matched</th><th>Measure</th></tr></thead>
+        <tbody>${scan.duplicates.map((d) => `<tr>
+          <td class="mono">${esc(d.documentId)}</td>
+          <td class="mono muted">${esc(d.subjectId ?? '—')}</td>
+          <td>${esc(titleCase(d.kind))}</td>
+          <td class="mono">${esc(d.measure)} ${esc(d.value)}</td>
+        </tr>`).join('')}</tbody></table>
+      </div>` : ''}
+
+    ${p ? `
+      <div class="card" style="margin-top:12px">
+        <div class="card-hdr"><div><div class="card-title">What the file is made of</div>
+          <div class="card-sub">Read from the bytes — the page was never rendered</div></div></div>
+        <div class="card-body">
+          <dl class="kv">
+            <dt>PDF version</dt><dd class="mono">${esc(p.version ?? '—')}</dd>
+            <dt>Times saved</dt><dd class="mono">${esc(p.revisions)}${p.revisions > 1
+              ? ` <span class="muted">— the file keeps every earlier version</span>` : ''}</dd>
+            <dt>Produced by</dt><dd>${esc(p.meta.producer ?? 'not stated')}</dd>
+            <dt>Created</dt><dd class="mono">${esc(p.meta.createdAt ?? '—')}</dd>
+            <dt>Last modified</dt><dd class="mono">${esc(p.meta.modifiedAt ?? '—')}</dd>
+            <dt>Pages · streams</dt><dd class="mono">${esc(p.pages)} · ${esc(p.streams)}</dd>
+            <dt>Fonts</dt><dd class="mono">${esc(p.fonts.join(', ') || 'none embedded')}</dd>
+            <dt>Text layer</dt><dd>${p.hasTextLayer
+              ? `<span class="badge b-passed">${esc(p.textLength)} characters</span>`
+              : '<span class="badge b-review">none — this is a picture</span>'}</dd>
+            <dt>Signed</dt><dd>${p.signatures
+              ? '<span class="badge b-passed">Carries a signature</span>'
+              : '<span class="muted">No digital signature</span>'}</dd>
+          </dl>
+          ${p.changedFrom && (p.changedFrom.removed.length || p.changedFrom.added.length) ? `
+            <div class="note note-danger" style="margin-top:12px">
+              <b>An earlier version of this page is still inside the file.</b>
+              <dl class="kv" style="margin-top:8px">
+                <dt>It said</dt><dd class="mono">${esc(p.changedFrom.removed.join(' ') || '—')}</dd>
+                <dt>It now says</dt><dd class="mono">${esc(p.changedFrom.added.join(' ') || '—')}</dd>
+              </dl>
+              <div style="margin-top:6px;font-size:11px">This is not an inference from metadata. It is the
+              document's own previous wording, preserved by the act of saving over it.</div>
+            </div>` : ''}
+        </div>
+      </div>` : ''}
+
+    ${scan.image ? `
+      <div class="card" style="margin-top:12px">
+        <div class="card-hdr"><div><div class="card-title">What the page looks like to a compressor</div></div></div>
+        <div class="card-body">
+          <dl class="kv">
+            <dt>Size</dt><dd class="mono">${esc(scan.image.width)}×${esc(scan.image.height)}</dd>
+            <dt>Brightness · contrast</dt><dd class="mono">${esc(scan.image.brightness)}% · ${esc(scan.image.contrast)}%</dd>
+            <dt>Regions examined</dt><dd class="mono">${esc(scan.image.splice?.cellsExamined ?? 0)}</dd>
+            <dt>Worst outlier</dt><dd class="mono">${esc(scan.image.splice?.worst ?? 0)} deviations from the page median</dd>
+          </dl>
+        </div>
+      </div>` : ''}
+
+    <div class="note note-info" style="margin-top:12px;font-size:11px">
+      <b>What this cannot do.</b> There is no reference library of genuine issuer templates, no
+      certificate chain validated for a signed PDF, and no optical character recognition — so a
+      scanned paper document yields no text, the arithmetic checks do not run on it, and the scan
+      says so rather than passing it for want of evidence.
+    </div>`;
+}
 
 RENDER.credit = async () => {
   const bureaus = await DB.fetchBureaus();

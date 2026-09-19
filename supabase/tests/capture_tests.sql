@@ -231,4 +231,60 @@ begin
     (select mrz from public.document_security_features where doc_type = 'sa_id_card'), true);
 end $$;
 
+-- ── Document scanning scores the way the browser scores ────────
+-- The reading happens in the page and the judgement happens here, so
+-- the two have to agree about what a finding is worth. They are
+-- checked against each other rather than assumed to match.
+do $$
+declare r jsonb;
+begin
+  r := public.score_document_scan(array[]::text[]);
+  perform public.expect('a document with no findings scores 100', (r->>'score')::int, 100);
+  perform public.expect('and passes', r->>'status', 'passed');
+  perform public.expect('with nothing under any of the three questions',
+    (jsonb_array_length(r->'altered') + jsonb_array_length(r->'counterfeit')
+     + jsonb_array_length(r->'duplicate')), 0);
+
+  -- A document that contradicts its own arithmetic settles the
+  -- question by itself. So does one carrying an earlier version of
+  -- its own page that said something different — both are the
+  -- document disagreeing with itself rather than merely looking odd.
+  r := public.score_document_scan(array['arithmetic_does_not_reconcile']);
+  perform public.expect('arithmetic that does not balance is decisive', (r->>'decisive')::boolean, true);
+  perform public.expect('and fails the document', r->>'status', 'failed');
+
+  r := public.score_document_scan(array['pdf_previous_version_differs']);
+  perform public.expect('a superseded page that said something else is decisive',
+    (r->>'decisive')::boolean, true);
+
+  -- Being saved twice is not, on its own, evidence of anything. An HR
+  -- clerk re-saving a payslip does this, and refusing on it would turn
+  -- ordinary office habits into fraud allegations.
+  r := public.score_document_scan(array['pdf_saved_more_than_once']);
+  perform public.expect('one weak finding still passes', r->>'status', 'passed');
+  perform public.expect('and is filed under the right question',
+    r->'altered'->>0, 'pdf_saved_more_than_once');
+
+  -- Three ordinary findings together are not ordinary.
+  r := public.score_document_scan(array[
+    'pdf_saved_more_than_once', 'pdf_modified_after_creation', 'pdf_producer_is_image_editor']);
+  perform public.expect('three findings together fail the document', r->>'status', 'failed');
+
+  r := public.score_document_scan(array['document_reused_across_identities']);
+  perform public.expect('one document under two identities is filed as a duplicate',
+    r->'duplicate'->>0, 'document_reused_across_identities');
+  perform public.expect('and goes to a person rather than being refused outright',
+    r->>'status', 'manual_review');
+
+  perform public.expect('an unknown finding deducts nothing',
+    (public.score_document_scan(array['not_a_rule_anyone_registered'])->>'score')::int, 100);
+
+  perform public.expect('exactly two scanning rules are decisive on their own',
+    (select count(*) from public.document_scan_rules where decisive and active), 2::bigint);
+
+  perform public.expect('every scanning rule answers one of the three questions',
+    (select count(*) from public.document_scan_rules
+      where question not in ('altered', 'counterfeit', 'duplicate')), 0::bigint);
+end $$;
+
 do $$ begin raise notice '───────────  ALL CAPTURE TESTS PASSED  ───────────'; end $$;

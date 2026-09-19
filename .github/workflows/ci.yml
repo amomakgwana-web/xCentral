@@ -203,6 +203,14 @@ jobs:
       - name: Vision maths
         run: npm run test:vision
 
+      # The document scanner, against six PDFs each differing from the
+      # clean one in exactly one respect — so a finding can only be
+      # explained by the thing that was changed. The fabricated one
+      # matters most: it reconciles perfectly, because whoever built it
+      # did the arithmetic, and only the file's own metadata catches it.
+      - name: Document scanning
+        run: npm run test:docscan
+
       # The whole capture wizard end to end against the real pipeline —
       # three journeys that have to end differently: the applicant's own
       # document, somebody else's, and the same face presented under a

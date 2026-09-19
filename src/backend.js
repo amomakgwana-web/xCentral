@@ -219,6 +219,18 @@ const fetchRequirements = () => select('verification_requirements', (q) => q.ord
 const fetchBureaus      = () => select('credit_bureaus', (q) => q.eq('active', true).order('name'));
 const fetchDocumentTypes= () => select('document_types', (q) => q.eq('active', true).order('category'));
 
+// The documents already examined, newest first, with what the
+// examination found. Until now this page listed the TYPES the system
+// accepts and none of the documents it had actually seen — a
+// configuration screen standing where a record should be.
+const fetchDocuments = (limit = 300) => select('documents',
+  (q) => q.order('created_at', { ascending: false }).limit(limit));
+const fetchDocumentVerifications = (limit = 300) => select('document_verifications',
+  (q) => q.order('created_at', { ascending: false }).limit(limit));
+const fetchDocumentForensics = (limit = 300) => select('document_forensics',
+  (q) => q.order('created_at', { ascending: false }).limit(limit));
+const fetchScanRules = () => select('document_scan_rules', (q) => q);
+
 // Validates an SA ID without opening a case — the check-digit
 // arithmetic only, for the console's inline validator.
 async function validateSaId(idNumber) {
@@ -397,6 +409,14 @@ const submitCapture       = (payload) => invoke('capture-intake', payload);
 // whichever capture happened to arrive second would make the order of
 // the wizard part of the logic.
 const reconcileCapture    = (payload) => invoke('capture-intake', { action: 'reconcile', ...payload });
+
+// Scanning an uploaded document for tampering, fabrication and reuse.
+// The reading happens in src/vision/scan.js, in the browser, because
+// the file is there and sending it anywhere is a decision nobody asked
+// for. These two carry the readings to the hub and fetch what they
+// should be compared against.
+const documentCorpus      = () => invoke('scan-document', { action: 'corpus' });
+const recordDocumentScan  = (payload) => invoke('scan-document', payload);
 const adjudicate          = (payload) => invoke('agent-adjudicate', { action: 'adjudicate', ...payload });
 const applyAgentDecision  = (runId, outcome, reason) => invoke('agent-adjudicate', { action: 'decide', runId, outcome, reason });
 
@@ -493,6 +513,10 @@ window.XC_DB = {
   fetchRequirements,
   fetchBureaus,
   fetchDocumentTypes,
+  fetchDocuments,
+  fetchDocumentVerifications,
+  fetchDocumentForensics,
+  fetchScanRules,
   subscribeCases,
 
   // Customer lifecycle
@@ -521,6 +545,8 @@ window.XC_DB = {
   abandonCaptureSession,
   submitCapture,
   reconcileCapture,
+  documentCorpus,
+  recordDocumentScan,
   adjudicate,
   applyAgentDecision,
   fetchCaptureSessions,

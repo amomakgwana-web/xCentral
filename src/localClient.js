@@ -397,6 +397,14 @@ export function createLocalClient() {
       return pipeline.submitCapture(body);
     },
 
+    // Scanning an uploaded document. The page reads the file — it is
+    // the only thing that has it, and it never leaves the tab — and
+    // hands the readings here to be judged and recorded.
+    'scan-document': (body) => {
+      if (body.action === 'corpus') return { corpus: pipeline.scanCorpus() };
+      return pipeline.recordScan(body);
+    },
+
     'agent-adjudicate': (body) => {
       if (body.action === 'decide') {
         return pipeline.applyDecision({ runId: body.runId, outcome: body.outcome, reason: body.reason });
