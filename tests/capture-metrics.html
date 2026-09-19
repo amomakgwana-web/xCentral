@@ -1,0 +1,75 @@
+<!doctype html><html><head><meta charset="utf-8"><title>capture metrics</title>
+<!--
+  Checks the image-quality maths in src/capture.js against synthetic
+  images with known properties, in a real browser. Run with:
+    node tests/run-capture-metrics.mjs
+--></head>
+<body><!-- Bundled from src/capture.js by tests/run-capture-metrics.mjs. -->
+<script src="capture.bundle.js"></script>
+<script>
+// Synthetic images with known properties, so the metrics can be
+// checked against something rather than eyeballed.
+function makeCanvas(w, h, draw) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  return c;
+}
+function checkerboard(size) {
+  return makeCanvas(640, 640, (ctx, w, h) => {
+    for (let y = 0; y < h; y += size)
+      for (let x = 0; x < w; x += size) {
+        ctx.fillStyle = ((x / size + y / size) % 2) ? '#fff' : '#000';
+        ctx.fillRect(x, y, size, size);
+      }
+  });
+}
+function blurred(src, px) {
+  return makeCanvas(src.width, src.height, (ctx, w, h) => {
+    ctx.filter = `blur(${px}px)`;
+    ctx.drawImage(src, 0, 0);
+  });
+}
+function flat(level) {
+  return makeCanvas(640, 640, (ctx, w, h) => {
+    ctx.fillStyle = `rgb(${level},${level},${level})`;
+    ctx.fillRect(0, 0, w, h);
+  });
+}
+
+const results = [];
+const check = (label, cond, detail) => results.push({ label, ok: !!cond, detail });
+
+const sharp = checkerboard(16);
+const soft  = blurred(sharp, 4);
+const verySoft = blurred(sharp, 12);
+
+const qSharp = CAP.measureQuality(sharp);
+const qSoft  = CAP.measureQuality(soft);
+const qVery  = CAP.measureQuality(verySoft);
+
+check('a sharp image scores high sharpness', qSharp.sharpness > 500, `sharp=${qSharp.sharpness}`);
+check('  · blurring reduces it sharply', qSoft.sharpness < qSharp.sharpness / 3,
+  `sharp=${qSharp.sharpness} soft=${qSoft.sharpness}`);
+check('  · more blur reduces it further', qVery.sharpness < qSoft.sharpness,
+  `soft=${qSoft.sharpness} verySoft=${qVery.sharpness}`);
+check('  · a flat image has almost no sharpness', CAP.measureQuality(flat(128)).sharpness < 1,
+  `flat=${CAP.measureQuality(flat(128)).sharpness}`);
+
+const dark = CAP.measureQuality(flat(20));
+const mid  = CAP.measureQuality(flat(128));
+const bright = CAP.measureQuality(flat(240));
+check('brightness tracks luminance',
+  dark.brightness < mid.brightness && mid.brightness < bright.brightness,
+  `${dark.brightness} < ${mid.brightness} < ${bright.brightness}`);
+check('  · mid grey reads near 50', Math.abs(mid.brightness - 50) < 3, `${mid.brightness}`);
+
+check('a flat image has no contrast', mid.contrast < 1, `contrast=${mid.contrast}`);
+check('  · a checkerboard has high contrast', qSharp.contrast > 30, `contrast=${qSharp.contrast}`);
+
+check('dimensions are reported from the source, not the working copy',
+  qSharp.width === 640 && qSharp.height === 640, `${qSharp.width}x${qSharp.height}`);
+
+window.__RESULTS = results;
+window.__METRICS = { qSharp, qSoft, qVery, dark, mid, bright };
+</script></body></html>
